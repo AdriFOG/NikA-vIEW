@@ -126,6 +126,13 @@ struct ExplorerView: View {
     }
 
     var body: some View {
+        lifecycleConfiguredExplorer
+    }
+
+    /// Keep each SwiftUI composition small.  The complete Explorer screen owns
+    /// many sheets and dialogs; expressing them as one giant `body` makes the
+    /// Swift 5 type checker in Xcode 16.4 time out before compiling the app.
+    private var explorerLayout: some View {
         GeometryReader { proxy in
             VStack(spacing: 0) {
                 explorerTopBar
@@ -175,6 +182,10 @@ struct ExplorerView: View {
                 floatingAddButton
             }
         }
+    }
+
+    private var basicPresentedExplorer: some View {
+        explorerLayout
         .navigationBarHidden(true)
         .sheet(isPresented: $showFolderPicker) {
             ExplorerFolderPicker { url in
@@ -225,6 +236,10 @@ struct ExplorerView: View {
                 trash: trash
             )
         }
+    }
+
+    private var vaultPresentedExplorer: some View {
+        basicPresentedExplorer
         .sheet(item: $editorTarget) { target in
             ExplorerTextEditorView(
                 url: target.url,
@@ -290,6 +305,10 @@ struct ExplorerView: View {
         .task {
             await checkSpaceWarnings()
         }
+    }
+
+    private var utilityPresentedExplorer: some View {
+        vaultPresentedExplorer
         .sheet(isPresented: $showOperations) {
             ExplorerOperationQueueView(queue: operationQueue)
         }
@@ -317,6 +336,10 @@ struct ExplorerView: View {
         .sheet(isPresented: $showShareSheet) {
             ExplorerShareSheet(urls: shareURLs)
         }
+    }
+
+    private var dialogPresentedExplorer: some View {
+        utilityPresentedExplorer
         .alert(
             "Nueva carpeta",
             isPresented: $showNewFolder
@@ -458,6 +481,10 @@ struct ExplorerView: View {
         } message: {
             Text(globalError ?? "")
         }
+    }
+
+    private var lifecycleConfiguredExplorer: some View {
+        dialogPresentedExplorer
         .onAppear {
             locations.refreshPersistentReferences()
 

@@ -267,6 +267,12 @@ enum ExplorerVaultBridge {
 
 // MARK: - Editor de texto
 
+/// This limit is also read from a detached I/O task. Keep it outside the
+/// SwiftUI view so the access is not inferred as MainActor-isolated.
+private enum ExplorerTextEditorLimits {
+    static let maximumBytes: Int64 = 2_000_000
+}
+
 struct ExplorerEditorTarget: Identifiable {
     let id = UUID()
     let url: URL
@@ -291,7 +297,7 @@ struct ExplorerTextEditorView: View {
     @AppStorage("NikaidoExplorer.editorMonospaced") private var monospaced = true
     @AppStorage("NikaidoExplorer.editorFontSize") private var fontSize = 15.0
 
-    static let maxBytes: Int64 = 2_000_000
+    static let maxBytes = ExplorerTextEditorLimits.maximumBytes
 
     static let textExtensions: Set<String> = [
         "txt", "md", "markdown", "json", "xml", "yaml", "yml", "log", "csv",
@@ -425,7 +431,7 @@ struct ExplorerTextEditorView: View {
             let data = try await Task.detached(priority: .userInitiated) { () -> Data in
                 let values = try fileURL.resourceValues(forKeys: [.fileSizeKey])
 
-                if Int64(values.fileSize ?? 0) > ExplorerTextEditorView.maxBytes {
+                if Int64(values.fileSize ?? 0) > ExplorerTextEditorLimits.maximumBytes {
                     throw ExplorerOperationError.operationFailed(
                         "El archivo es muy grande para editarlo aquí (máximo 2 MB)."
                     )

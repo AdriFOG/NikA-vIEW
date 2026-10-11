@@ -66,9 +66,12 @@ struct ExplorerDragPayload: Codable {
 
         let token = String(text.dropFirst(prefix.count))
 
-        lock.lock()
-        let payload = (currentToken == token) ? currentPayload : nil
-        lock.unlock()
+        // NSLock.lock()/unlock() are unavailable directly from an async
+        // context under the Swift 6 concurrency checks used by Xcode 16.4.
+        // Keep the critical section synchronous and scoped instead.
+        let payload = lock.withLock {
+            (currentToken == token) ? currentPayload : nil
+        }
 
         guard let payload else {
             throw ExplorerOperationError.operationFailed("El arrastre ya no es válido. Inténtalo de nuevo.")

@@ -168,6 +168,17 @@ jobs:
         if: always()
         run: |
           set -euo pipefail
+
+          if [ "${{ steps.iosbuild.outcome }}" != "success" ]; then
+            echo "::error title=iOS build failed::Xcode failed before bundle validation. See the compiler summary below."
+            if [ -f build/diagnostics/compiler-summary.txt ]; then
+              cat build/diagnostics/compiler-summary.txt
+            elif [ -f build/ios/xcodebuild.log ]; then
+              grep -E -n "error:|warning:|BUILD FAILED" build/ios/xcodebuild.log || true
+            fi
+            exit 1
+          fi
+
           test "${{ steps.selftest.outcome }}" = "success"
           test "${{ steps.packages.outcome }}" = "success"
           test "${{ steps.pctest.outcome }}" = "success"
