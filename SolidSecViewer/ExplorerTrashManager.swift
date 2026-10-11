@@ -103,6 +103,25 @@ final class ExplorerTrashManager: ObservableObject {
         save()
     }
 
+    /// Espacio que ocupan los elementos de la papelera.
+    func totalBytes() async -> Int64 {
+        let current = entries
+
+        return await Task.detached(priority: .utility) {
+            var total: Int64 = 0
+
+            for entry in current {
+                let root = URL(fileURLWithPath: entry.rootPath, isDirectory: true)
+                let source = root.appendingPathComponent(entry.trashRelativePath)
+                total += ExplorerStorageUsage.size(
+                    of: source.deletingLastPathComponent()
+                )
+            }
+
+            return total
+        }.value
+    }
+
     func empty() async {
         let current = entries
         await Task.detached(priority: .utility) {

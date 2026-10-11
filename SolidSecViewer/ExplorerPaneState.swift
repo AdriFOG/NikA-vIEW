@@ -72,6 +72,56 @@ final class ExplorerPaneState: ObservableObject, Identifiable {
         openLocation(location, folderURL: location.rootURL)
     }
 
+    // MARK: - Historial (atrás / adelante)
+
+    @Published private(set) var backStack: [URL] = []
+    @Published private(set) var forwardStack: [URL] = []
+
+    var canGoBack: Bool { !backStack.isEmpty }
+    var canGoForward: Bool { !forwardStack.isEmpty }
+
+    private func recordNavigation(from previous: URL?) {
+        if let previous {
+            backStack.append(previous)
+
+            if backStack.count > 50 {
+                backStack.removeFirst()
+            }
+        }
+
+        forwardStack.removeAll()
+    }
+
+    func goBack() {
+        guard let target = backStack.popLast() else { return }
+
+        if let currentURL {
+            forwardStack.append(currentURL)
+        }
+
+        currentURL = target
+        selectedIDs.removeAll()
+
+        Task {
+            await refresh()
+        }
+    }
+
+    func goForward() {
+        guard let target = forwardStack.popLast() else { return }
+
+        if let currentURL {
+            backStack.append(currentURL)
+        }
+
+        currentURL = target
+        selectedIDs.removeAll()
+
+        Task {
+            await refresh()
+        }
+    }
+
     func openLocation(
         _ location: ExplorerStorageLocation,
         folderURL: URL
@@ -81,6 +131,13 @@ final class ExplorerPaneState: ObservableObject, Identifiable {
                 folderURL,
                 root: location.rootURL
             )
+
+            if self.location?.id == location.id {
+                recordNavigation(from: currentURL)
+            } else {
+                backStack.removeAll()
+                forwardStack.removeAll()
+            }
 
             self.location = location
             currentURL = folderURL.standardizedFileURL
@@ -104,6 +161,7 @@ final class ExplorerPaneState: ObservableObject, Identifiable {
                 item.url,
                 root: location.rootURL
             )
+            recordNavigation(from: currentURL)
             currentURL = item.url
             selectedIDs.removeAll()
 
@@ -132,6 +190,7 @@ final class ExplorerPaneState: ObservableObject, Identifiable {
                 root: location.rootURL
             )
 
+            recordNavigation(from: self.currentURL)
             self.currentURL = parent
             selectedIDs.removeAll()
 
@@ -146,6 +205,7 @@ final class ExplorerPaneState: ObservableObject, Identifiable {
     func goRoot() {
         guard let location else { return }
 
+        recordNavigation(from: currentURL)
         currentURL = location.rootURL
         selectedIDs.removeAll()
 

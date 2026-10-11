@@ -152,6 +152,61 @@ enum ExplorerFileEngine {
         }.value
     }
 
+    /// Copia un archivo (por ejemplo, uno traído con el selector de Archivos)
+    /// a una carpeta, sin pisar los que ya existen.
+    static func importFile(
+        from source: URL,
+        into directory: URL,
+        root: URL
+    ) async throws {
+        try ensureInsideRoot(directory, root: root)
+        let baseName = try cleanName(source.lastPathComponent)
+
+        try await Task.detached(priority: .userInitiated) {
+            try coordinatedWrite(at: directory) { coordinatedDirectory in
+                let stem = (baseName as NSString).deletingPathExtension
+                let ext = (baseName as NSString).pathExtension
+
+                var target = coordinatedDirectory.appendingPathComponent(baseName)
+                var counter = 2
+
+                while FileManager.default.fileExists(atPath: target.path) {
+                    let candidate = ext.isEmpty
+                        ? "\(stem) \(counter)"
+                        : "\(stem) \(counter).\(ext)"
+                    target = coordinatedDirectory.appendingPathComponent(candidate)
+                    counter += 1
+                }
+
+                try FileManager.default.copyItem(at: source, to: target)
+            }
+        }.value
+    }
+
+    /// Guarda texto UTF-8 en un archivo existente (editor de texto).
+    static func writeText(
+        _ text: String,
+        to fileURL: URL,
+        root: URL
+    ) async throws {
+        try ensureInsideRoot(fileURL, root: root)
+
+        let directory = fileURL.deletingLastPathComponent()
+        let name = fileURL.lastPathComponent
+        let data = Data(text.utf8)
+
+        try await Task.detached(priority: .userInitiated) {
+            try coordinatedWrite(at: directory) { coordinatedDirectory in
+                let target = coordinatedDirectory.appendingPathComponent(
+                    name,
+                    isDirectory: false
+                )
+
+                try data.write(to: target, options: [.atomic])
+            }
+        }.value
+    }
+
     static func createFile(
         named rawName: String,
         contents: Data,

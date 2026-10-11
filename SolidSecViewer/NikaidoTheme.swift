@@ -19,33 +19,27 @@ enum NikaidoTheme {
     }
 }
 
-/// Botón redondo compacto para barras de herramientas.
+/// Botón de ícono plano y minimalista (sin fondo) para barras de herramientas.
 struct NikaidoIconButtonStyle: ButtonStyle {
     var prominent = false
 
     @Environment(\.isEnabled) private var isEnabled
+    @Environment(\.nikaidoAccent) private var accent
 
     func makeBody(configuration: Configuration) -> some View {
         configuration.label
-            .font(.system(size: 15, weight: .semibold))
-            .foregroundStyle(prominent ? Color.white : NikaidoTheme.accent)
-            .frame(width: 34, height: 34)
-            .background(
-                Circle().fill(
-                    prominent
-                        ? AnyShapeStyle(NikaidoTheme.gradient)
-                        : AnyShapeStyle(NikaidoTheme.accent.opacity(0.12))
-                )
-            )
-            .scaleEffect(configuration.isPressed ? 0.92 : 1)
-            .opacity(isEnabled ? 1 : 0.35)
-            .animation(.easeOut(duration: 0.12), value: configuration.isPressed)
+            .font(.system(size: 17, weight: .regular))
+            .foregroundStyle(prominent ? accent : Color.primary)
+            .frame(width: 36, height: 36)
+            .contentShape(Rectangle())
+            .opacity(isEnabled ? (configuration.isPressed ? 0.5 : 1) : 0.3)
     }
 }
 
 /// Botón principal ancho con degradado.
 struct NikaidoPrimaryButtonStyle: ButtonStyle {
     @Environment(\.isEnabled) private var isEnabled
+    @Environment(\.nikaidoAccent) private var accent
 
     func makeBody(configuration: Configuration) -> some View {
         configuration.label
@@ -55,28 +49,24 @@ struct NikaidoPrimaryButtonStyle: ButtonStyle {
             .padding(.vertical, 14)
             .background(
                 RoundedRectangle(cornerRadius: 16, style: .continuous)
-                    .fill(NikaidoTheme.gradient)
+                    .fill(accent)
             )
             .opacity(isEnabled ? (configuration.isPressed ? 0.85 : 1) : 0.4)
             .padding(.horizontal, 28)
     }
 }
 
-/// Cuadrito con ícono y color suave (carpetas, fotos, videos, etc.).
+/// Ícono plano de archivo/carpeta (sin cajita de fondo).
 struct NikaidoIconBadge: View {
     let systemName: String
     let tint: Color
-    var size: CGFloat = 42
+    var size: CGFloat = 30
 
     var body: some View {
         Image(systemName: systemName)
-            .font(.system(size: size * 0.46, weight: .semibold))
+            .font(.system(size: size * 0.72, weight: .regular))
             .foregroundStyle(tint)
-            .frame(width: size, height: size)
-            .background(
-                RoundedRectangle(cornerRadius: size * 0.28, style: .continuous)
-                    .fill(tint.opacity(0.15))
-            )
+            .frame(width: size + 6, height: size)
     }
 }
 
@@ -88,15 +78,9 @@ struct NikaidoEmptyState: View {
 
     var body: some View {
         VStack(spacing: 10) {
-            ZStack {
-                Circle()
-                    .fill(NikaidoTheme.accent.opacity(0.12))
-                    .frame(width: 84, height: 84)
-
-                Image(systemName: systemName)
-                    .font(.system(size: 34, weight: .semibold))
-                    .foregroundStyle(NikaidoTheme.accent)
-            }
+            Image(systemName: systemName)
+                .font(.system(size: 38, weight: .light))
+                .foregroundStyle(.tertiary)
 
             Text(title)
                 .font(.headline)
@@ -158,31 +142,5 @@ extension View {
                 RoundedRectangle(cornerRadius: 14, style: .continuous)
                     .fill(Color(uiColor: .secondarySystemBackground))
             )
-    }
-}
-
-extension ExplorerFileItem {
-    /// Color asociado al tipo de archivo.
-    var nikaidoTint: Color {
-        if isDirectory {
-            return NikaidoTheme.accent
-        }
-
-        switch pathExtension {
-        case "zip", "7z", "rar":
-            return Color(red: 0.95, green: 0.62, blue: 0.15)
-        case "jpg", "jpeg", "png", "gif", "webp", "heic", "heif":
-            return Color(red: 0.93, green: 0.35, blue: 0.55)
-        case "mp4", "mov", "m4v", "mkv", "avi", "webm", "3gp":
-            return Color(red: 0.62, green: 0.35, blue: 0.92)
-        case "mp3", "m4a", "aac", "wav", "flac", "ogg":
-            return Color(red: 0.20, green: 0.70, blue: 0.45)
-        case "pdf":
-            return Color(red: 0.90, green: 0.27, blue: 0.27)
-        case "txt", "md", "json", "xml", "log", "csv":
-            return Color(red: 0.25, green: 0.55, blue: 0.95)
-        default:
-            return Color(red: 0.52, green: 0.55, blue: 0.62)
-        }
     }
 }

@@ -2,6 +2,9 @@ import Foundation
 import UniformTypeIdentifiers
 
 extension UTType {
+    /// Tipo propio de Nikaido Explorer. Ya no se usa para arrastrar porque un
+    /// tipo personalizado no se registra cuando la app corre dentro de
+    /// LiveContainer; se conserva declarado en Info.plist por compatibilidad.
     static let nikaidoExplorerItems = UTType(exportedAs: "com.teamnikaido.explorer-items")
 }
 
@@ -9,45 +12,68 @@ struct ExplorerDragPayload: Codable {
     let urls: [String]
     let sourcePane: Int
 
+    private static let marker = "nikaido-explorer-items"
+    private static let lock = NSLock()
+    private static var currentToken: String?
+    private static var currentPayload: ExplorerDragPayload?
+
+    /// El arrastre viaja como texto simple (tipo del sistema) con un código de
+    /// un solo uso. Los datos reales se guardan en memoria, así funciona igual
+    /// con o sin tipos personalizados registrados.
     func itemProvider() -> NSItemProvider {
-        let provider = NSItemProvider()
-        provider.registerDataRepresentation(
-            forTypeIdentifier: UTType.nikaidoExplorerItems.identifier,
-            visibility: .all
-        ) { completion in
-            do {
-                completion(try JSONEncoder().encode(self), nil)
-            } catch {
-                completion(nil, error)
-            }
-            return nil
-        }
-        return provider
+        let token = UUID().uuidString
+
+        Self.lock.lock()
+        Self.currentToken = token
+        Self.currentPayload = self
+        Self.lock.unlock()
+
+        return NSItemProvider(
+            object: (Self.marker + ":" + token) as NSString
+        )
     }
 
     static func load(from providers: [NSItemProvider]) async throws -> ExplorerDragPayload {
         guard let provider = providers.first(where: {
-            $0.hasItemConformingToTypeIdentifier(UTType.nikaidoExplorerItems.identifier)
+            $0.canLoadObject(ofClass: NSString.self)
         }) else {
             throw ExplorerOperationError.operationFailed("El elemento arrastrado no pertenece a Nikaido Explorer.")
         }
 
-        return try await withCheckedThrowingContinuation { continuation in
-            provider.loadDataRepresentation(forTypeIdentifier: UTType.nikaidoExplorerItems.identifier) { data, error in
+        let text: String = try await withCheckedThrowingContinuation { continuation in
+            _ = provider.loadObject(ofClass: NSString.self) { object, error in
                 if let error {
                     continuation.resume(throwing: error)
                     return
                 }
-                guard let data else {
-                    continuation.resume(throwing: ExplorerOperationError.operationFailed("No se pudo leer el arrastre."))
+
+                guard let value = object as? NSString else {
+                    continuation.resume(
+                        throwing: ExplorerOperationError.operationFailed("No se pudo leer el arrastre.")
+                    )
                     return
                 }
-                do {
-                    continuation.resume(returning: try JSONDecoder().decode(Self.self, from: data))
-                } catch {
-                    continuation.resume(throwing: error)
-                }
+
+                continuation.resume(returning: value as String)
             }
         }
+
+        let prefix = marker + ":"
+
+        guard text.hasPrefix(prefix) else {
+            throw ExplorerOperationError.operationFailed("El elemento arrastrado no pertenece a Nikaido Explorer.")
+        }
+
+        let token = String(text.dropFirst(prefix.count))
+
+        lock.lock()
+        let payload = (currentToken == token) ? currentPayload : nil
+        lock.unlock()
+
+        guard let payload else {
+            throw ExplorerOperationError.operationFailed("El arrastre ya no es válido. Inténtalo de nuevo.")
+        }
+
+        return payload
     }
 }

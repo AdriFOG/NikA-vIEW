@@ -58,6 +58,7 @@ private enum ExplorerPendingAction {
 }
 
 struct ExplorerView: View {
+    @Environment(\.nikaidoAccent) private var nikaidoAccent
     let onOpenVault: () -> Void
     let onOpenSecReader: () -> Void
 
@@ -94,8 +95,23 @@ struct ExplorerView: View {
     @AppStorage("NikaidoExplorer.confirmDelete")
     private var confirmDelete = true
 
-    @AppStorage("NikaidoExplorer.stackedPanes")
-    private var stackedPanes = true
+    /// El segundo panel solo aparece cuando lo necesitas.
+    @State private var splitOpen = false
+    @State private var splitHint: String?
+    @State private var showFileImporter = false
+    @State private var editorTarget: ExplorerEditorTarget?
+    @State private var infoTarget: ExplorerFileItem?
+    @State private var vaultSendItems: [ExplorerFileItem] = []
+    @State private var vaultSendPane = 0
+    @State private var showVaultSendConfirm = false
+    @State private var vaultNeedsUnlock = false
+    @State private var spaceNotice: ExplorerSpaceNotice?
+    @State private var spaceChecked = false
+
+    @AppStorage("NikaidoExplorer.trashWarnMB") private var trashWarnMB = 500
+    @AppStorage("NikaidoExplorer.lowSpaceWarnMB") private var lowSpaceWarnMB = 1000
+
+    @EnvironmentObject private var privateVault: PrivateVaultSession
 
     private var conflictPolicy: ExplorerConflictPolicy {
         ExplorerConflictPolicy(rawValue: conflictPolicyRaw) ?? .rename
@@ -114,9 +130,12 @@ struct ExplorerView: View {
             VStack(spacing: 0) {
                 explorerTopBar
 
-                Divider()
-
-                if proxy.size.width >= 700 {
+                if !splitOpen {
+                    paneView(
+                        active,
+                        index: activePane
+                    )
+                } else if proxy.size.width >= 700 {
                     HStack(spacing: 0) {
                         paneView(
                             leftPane,
@@ -130,7 +149,7 @@ struct ExplorerView: View {
                             index: 1
                         )
                     }
-                } else if stackedPanes {
+                } else {
                     VStack(spacing: 0) {
                         paneView(
                             leftPane,
@@ -144,22 +163,6 @@ struct ExplorerView: View {
                             index: 1
                         )
                     }
-                } else {
-                    Picker(
-                        "Panel",
-                        selection: $activePane
-                    ) {
-                        Text("Panel 1").tag(0)
-                        Text("Panel 2").tag(1)
-                    }
-                    .pickerStyle(.segmented)
-                    .padding(.horizontal, 10)
-                    .padding(.vertical, 6)
-
-                    paneView(
-                        activePane == 0 ? leftPane : rightPane,
-                        index: activePane
-                    )
                 }
 
                 if active.selectionMode {
@@ -169,7 +172,7 @@ struct ExplorerView: View {
             }
             .background(Color(uiColor: .systemBackground))
             .overlay(alignment: .bottomTrailing) {
-                floatingAddButton(isNarrow: proxy.size.width < 700)
+                floatingAddButton
             }
         }
         .navigationBarHidden(true)
@@ -181,6 +184,24 @@ struct ExplorerView: View {
                     globalError = message
                 }
             }
+        }
+        .sheet(isPresented: $showFileImporter) {
+            ExplorerFilePicker { urls in
+                importFiles(urls)
+            }
+        }
+        .alert(
+            "Panel de destino",
+            isPresented: Binding(
+                get: { splitHint != nil },
+                set: { if !$0 { splitHint = nil } }
+            )
+        ) {
+            Button("Entendido", role: .cancel) {
+                splitHint = nil
+            }
+        } message: {
+            Text(splitHint ?? "")
         }
         .sheet(isPresented: $showStorageLocations) {
             ExplorerStorageLocationsView(
@@ -200,8 +221,74 @@ struct ExplorerView: View {
         .sheet(isPresented: $showSettings) {
             ExplorerSettingsView(
                 conflictPolicyRaw: $conflictPolicyRaw,
-                confirmDelete: $confirmDelete
+                confirmDelete: $confirmDelete,
+                trash: trash
             )
+        }
+        .sheet(item: $editorTarget) { target in
+            ExplorerTextEditorView(
+                url: target.url,
+                root: target.root
+            ) {
+                Task {
+                    await leftPane.refresh()
+                    await rightPane.refresh()
+                }
+            }
+        }
+        .sheet(item: $infoTarget) { item in
+            ExplorerFileInfoView(item: item)
+        }
+        .alert(
+            "Bóveda bloqueada",
+            isPresented: $vaultNeedsUnlock
+        ) {
+            Button("Abrir bóveda") {
+                onOpenVault()
+            }
+
+            Button("Cancelar", role: .cancel) {}
+        } message: {
+            Text("Desbloquea Nikaido Vault y vuelve a intentarlo. Los archivos se cifran dentro de la bóveda.")
+        }
+        .confirmationDialog(
+            "Mover a la bóveda",
+            isPresented: $showVaultSendConfirm,
+            titleVisibility: .visible
+        ) {
+            Button("Cifrar y borrar originales", role: .destructive) {
+                performSendToVault()
+            }
+
+            Button("Cancelar", role: .cancel) {
+                vaultSendItems = []
+            }
+        } message: {
+            Text("Se cifran dentro de la bóveda y los originales se borran sin pasar por la papelera.")
+        }
+        .alert(
+            spaceNotice?.title ?? "Espacio",
+            isPresented: Binding(
+                get: { spaceNotice != nil },
+                set: { if !$0 { spaceNotice = nil } }
+            )
+        ) {
+            if spaceNotice?.isTrash == true {
+                Button("Vaciar papelera", role: .destructive) {
+                    Task {
+                        await trash.empty()
+                    }
+                }
+            }
+
+            Button("Ahora no", role: .cancel) {
+                spaceNotice = nil
+            }
+        } message: {
+            Text(spaceNotice?.message ?? "")
+        }
+        .task {
+            await checkSpaceWarnings()
         }
         .sheet(isPresented: $showOperations) {
             ExplorerOperationQueueView(queue: operationQueue)
@@ -389,54 +476,52 @@ struct ExplorerView: View {
     }
 
     private var explorerTopBar: some View {
-        HStack(spacing: 8) {
-            Image(systemName: "folder.fill")
-                .font(.system(size: 18, weight: .bold))
-                .foregroundStyle(.white)
-                .frame(width: 38, height: 38)
-                .background(
-                    RoundedRectangle(cornerRadius: 11, style: .continuous)
-                        .fill(NikaidoTheme.gradient)
-                )
-
-            VStack(alignment: .leading, spacing: 1) {
-                Text("Nikaido Explorer")
-                    .font(.headline.weight(.bold))
+        HStack(spacing: 2) {
+            Button {
+                showStorageLocations = true
+            } label: {
+                HStack(spacing: 5) {
+                    Text(
+                        active.location?.name
+                        ?? "Elegir almacenamiento"
+                    )
+                    .font(.title3.weight(.semibold))
                     .lineLimit(1)
 
-                Text(
-                    active.location?.name
-                    ?? "Sin almacenamiento"
-                )
-                .font(.caption)
-                .foregroundStyle(.secondary)
-                .lineLimit(1)
+                    Image(systemName: "chevron.down")
+                        .font(.system(size: 11, weight: .bold))
+                        .foregroundStyle(.secondary)
+                }
+                .foregroundStyle(.primary)
             }
+            .buttonStyle(.plain)
+            .accessibilityLabel("Dispositivos de almacenamiento")
 
             Spacer()
 
             if isOperating || operationQueue.isRunning {
                 ProgressView()
                     .controlSize(.small)
+                    .padding(.trailing, 4)
             }
 
-            Button {
-                showOperations = true
-            } label: {
-                ZStack(alignment: .topTrailing) {
-                    Image(systemName: "list.bullet.rectangle")
-                    if operationQueue.activeCount > 0 {
+            if operationQueue.activeCount > 0 {
+                Button {
+                    showOperations = true
+                } label: {
+                    ZStack(alignment: .topTrailing) {
+                        Image(systemName: "list.bullet.rectangle")
                         Text("\(operationQueue.activeCount)")
                             .font(.system(size: 8, weight: .bold))
                             .padding(3)
-                            .background(.red, in: Circle())
+                            .background(nikaidoAccent, in: Circle())
                             .foregroundStyle(.white)
                             .offset(x: 6, y: -6)
                     }
                 }
+                .buttonStyle(NikaidoIconButtonStyle())
+                .accessibilityLabel("Cola de operaciones")
             }
-            .buttonStyle(NikaidoIconButtonStyle())
-            .accessibilityLabel("Cola de operaciones")
 
             if trash.canUndo {
                 Button {
@@ -453,12 +538,12 @@ struct ExplorerView: View {
             }
 
             Button {
-                showStorageLocations = true
+                toggleSplit()
             } label: {
-                Image(systemName: "externaldrive.fill")
+                Image(systemName: splitOpen ? "rectangle" : "rectangle.split.1x2")
             }
-            .buttonStyle(NikaidoIconButtonStyle())
-            .accessibilityLabel("Dispositivos de almacenamiento")
+            .buttonStyle(NikaidoIconButtonStyle(prominent: splitOpen))
+            .accessibilityLabel(splitOpen ? "Cerrar segundo panel" : "Abrir segundo panel")
 
             Menu {
                 Section("Archivos") {
@@ -678,11 +763,177 @@ struct ExplorerView: View {
             } label: {
                 Image(systemName: "ellipsis")
             }
-            .buttonStyle(NikaidoIconButtonStyle(prominent: true))
+            .buttonStyle(NikaidoIconButtonStyle())
             .accessibilityLabel("Acciones")
         }
-        .padding(.horizontal, 12)
-        .padding(.vertical, 10)
+        .padding(.leading, 16)
+        .padding(.trailing, 8)
+        .padding(.vertical, 6)
+    }
+
+    private func checkSpaceWarnings() async {
+        guard !spaceChecked else { return }
+        spaceChecked = true
+
+        if trashWarnMB > 0 {
+            let bytes = await trash.totalBytes()
+
+            if bytes > Int64(trashWarnMB) * 1_000_000 {
+                spaceNotice = .trash(bytes)
+                return
+            }
+        }
+
+        if
+            lowSpaceWarnMB > 0,
+            let free = ExplorerStorageUsage.freeSpace(),
+            free < Int64(lowSpaceWarnMB) * 1_000_000
+        {
+            spaceNotice = .lowSpace(free)
+        }
+    }
+
+    private func openEditor(_ item: ExplorerFileItem, paneIndex: Int) {
+        activePane = paneIndex
+
+        guard let root = pane(at: paneIndex).location?.rootURL else { return }
+
+        editorTarget = ExplorerEditorTarget(url: item.url, root: root)
+    }
+
+    private func addFavorite(_ item: ExplorerFileItem, paneIndex: Int) {
+        guard
+            item.isDirectory,
+            let location = pane(at: paneIndex).location
+        else {
+            return
+        }
+
+        do {
+            try favorites.add(location: location, folderURL: item.url)
+        } catch {
+            globalError = error.localizedDescription
+        }
+    }
+
+    private func requestSendToVault(
+        _ items: [ExplorerFileItem],
+        paneIndex: Int
+    ) {
+        guard !items.isEmpty else { return }
+
+        guard privateVault.isUnlocked else {
+            vaultNeedsUnlock = true
+            return
+        }
+
+        vaultSendItems = items
+        vaultSendPane = paneIndex
+        showVaultSendConfirm = true
+    }
+
+    private func performSendToVault() {
+        let items = vaultSendItems
+        let sourcePane = pane(at: vaultSendPane)
+
+        vaultSendItems = []
+
+        guard let root = sourcePane.location?.rootURL, !items.isEmpty else {
+            return
+        }
+
+        let title = items.count == 1
+            ? "Mover \(items[0].name) a la bóveda"
+            : "Mover \(items.count) elementos a la bóveda"
+
+        let vault = privateVault
+
+        operationQueue.enqueue(title: title, kind: .move) {
+            for item in items {
+                try await ExplorerVaultBridge.send(
+                    item.url,
+                    into: vault,
+                    parentID: nil
+                )
+            }
+
+            try await ExplorerFileEngine.delete(items, root: root)
+            await sourcePane.refresh()
+        }
+    }
+
+    private func toggleSplit() {
+        if splitOpen {
+            withAnimation(.easeInOut(duration: 0.2)) {
+                splitOpen = false
+            }
+        } else {
+            openSplit()
+        }
+    }
+
+    /// Abre el segundo panel mostrando la misma carpeta que el activo.
+    private func openSplit() {
+        if
+            let location = active.location,
+            let folder = active.currentURL,
+            other.currentURL == nil
+        {
+            other.openLocation(location, folderURL: folder)
+        }
+
+        withAnimation(.easeInOut(duration: 0.2)) {
+            splitOpen = true
+        }
+    }
+
+    /// Mover/copiar necesita un destino: si el segundo panel está cerrado, se
+    /// abre para que elijas la carpeta y vuelvas a tocar la acción.
+    private func requestTransfer(
+        _ items: [ExplorerFileItem],
+        fromPane paneIndex: Int,
+        moving: Bool
+    ) {
+        guard !items.isEmpty else { return }
+
+        if !splitOpen {
+            openSplit()
+            splitHint = "Abrí el segundo panel. Elige ahí la carpeta de destino y vuelve a tocar "
+                + (moving ? "Mover." : "Copiar.")
+            return
+        }
+
+        transfer(items, fromPane: paneIndex, moving: moving)
+    }
+
+    private func importFiles(_ urls: [URL]) {
+        guard
+            !urls.isEmpty,
+            let currentURL = active.currentURL,
+            let location = active.location
+        else {
+            return
+        }
+
+        let targetPane = active
+
+        Task {
+            isOperating = true
+            defer { isOperating = false }
+
+            do {
+                for url in urls {
+                    try await ExplorerFileEngine.importFile(
+                        from: url,
+                        into: currentURL,
+                        root: location.rootURL
+                    )
+                }
+                await targetPane.refresh()
+            } catch {
+                globalError = error.localizedDescription
+            }
+        }
     }
 
     @ViewBuilder
@@ -694,12 +945,18 @@ struct ExplorerView: View {
             pane: pane,
             paneIndex: index,
             isActive: activePane == index,
+            showsActiveMarker: splitOpen,
             onActivate: {
                 activePane = index
             },
             onOpenFile: { item in
                 activePane = index
-                previewTarget = ExplorerPreviewTarget(url: item.url)
+
+                if ExplorerTextEditorView.canEdit(item) {
+                    openEditor(item, paneIndex: index)
+                } else {
+                    previewTarget = ExplorerPreviewTarget(url: item.url)
+                }
             },
             onRename: { item in
                 activePane = index
@@ -715,7 +972,7 @@ struct ExplorerView: View {
             },
             onCopyToOther: { item in
                 activePane = index
-                transfer(
+                requestTransfer(
                     [item],
                     fromPane: index,
                     moving: false
@@ -723,7 +980,7 @@ struct ExplorerView: View {
             },
             onMoveToOther: { item in
                 activePane = index
-                transfer(
+                requestTransfer(
                     [item],
                     fromPane: index,
                     moving: true
@@ -748,6 +1005,21 @@ struct ExplorerView: View {
                     [item],
                     paneIndex: index
                 )
+            },
+            onFavorite: { item in
+                activePane = index
+                addFavorite(item, paneIndex: index)
+            },
+            onSendToVault: { item in
+                activePane = index
+                requestSendToVault([item], paneIndex: index)
+            },
+            onInfo: { item in
+                activePane = index
+                infoTarget = item
+            },
+            onEdit: { item in
+                openEditor(item, paneIndex: index)
             },
             onDropProviders: { providers in
                 handleDrop(providers, destinationPane: index)
@@ -774,7 +1046,7 @@ struct ExplorerView: View {
             .accessibilityLabel("Seleccionar todo")
 
             Button {
-                transfer(
+                requestTransfer(
                     active.selectedItems,
                     fromPane: activePane,
                     moving: false
@@ -786,7 +1058,7 @@ struct ExplorerView: View {
             .disabled(active.selectedItems.isEmpty)
 
             Button {
-                transfer(
+                requestTransfer(
                     active.selectedItems,
                     fromPane: activePane,
                     moving: true
@@ -812,6 +1084,15 @@ struct ExplorerView: View {
                     )
                 } label: {
                     Label("Comprimir ZIP", systemImage: "archivebox")
+                }
+
+                Button {
+                    requestSendToVault(
+                        active.selectedItems,
+                        paneIndex: activePane
+                    )
+                } label: {
+                    Label("Mover a la bóveda", systemImage: "lock.shield")
                 }
 
                 Button(role: .destructive) {
@@ -842,7 +1123,7 @@ struct ExplorerView: View {
         index == 0 ? rightPane : leftPane
     }
 
-    private func floatingAddButton(isNarrow: Bool) -> some View {
+    private var floatingAddButton: some View {
         let canCreate = active.currentURL != nil
 
         return Menu {
@@ -867,32 +1148,23 @@ struct ExplorerView: View {
                 Label("Archivo ZIP", systemImage: "doc.zipper")
             }
 
-            if isNarrow {
-                Divider()
+            Divider()
 
-                Button {
-                    stackedPanes.toggle()
-                } label: {
-                    Label(
-                        stackedPanes
-                            ? "Ver un panel a la vez"
-                            : "Ver los dos paneles",
-                        systemImage: stackedPanes
-                            ? "rectangle"
-                            : "rectangle.split.1x2"
-                    )
-                }
+            Button {
+                showFileImporter = true
+            } label: {
+                Label("Importar desde Archivos", systemImage: "square.and.arrow.down")
             }
         } label: {
             Image(systemName: "plus")
-                .font(.title2.weight(.bold))
+                .font(.system(size: 22, weight: .medium))
                 .foregroundStyle(.white)
-                .frame(width: 56, height: 56)
-                .background(Circle().fill(NikaidoTheme.gradient))
+                .frame(width: 54, height: 54)
+                .background(Circle().fill(nikaidoAccent))
                 .shadow(
-                    color: NikaidoTheme.accent.opacity(0.45),
-                    radius: 10,
-                    y: 5
+                    color: .black.opacity(0.18),
+                    radius: 8,
+                    y: 4
                 )
         }
         .disabled(!canCreate)
@@ -1185,10 +1457,12 @@ struct ExplorerView: View {
 }
 
 struct ExplorerPaneView: View {
+    @Environment(\.nikaidoAccent) private var nikaidoAccent
     @ObservedObject var pane: ExplorerPaneState
 
     let paneIndex: Int
     let isActive: Bool
+    let showsActiveMarker: Bool
     let onActivate: () -> Void
     let onOpenFile: (ExplorerFileItem) -> Void
     let onRename: (ExplorerFileItem) -> Void
@@ -1198,7 +1472,27 @@ struct ExplorerPaneView: View {
     let onShare: (ExplorerFileItem) -> Void
     let onExtract: (ExplorerFileItem) -> Void
     let onCompress: (ExplorerFileItem) -> Void
+    let onFavorite: (ExplorerFileItem) -> Void
+    let onSendToVault: (ExplorerFileItem) -> Void
+    let onInfo: (ExplorerFileItem) -> Void
+    let onEdit: (ExplorerFileItem) -> Void
     let onDropProviders: ([NSItemProvider]) -> Bool
+
+    @ObservedObject private var folderColors = NikaidoFolderColors.shared
+    @Environment(\.nikaidoFolderColor) private var defaultFolderColor
+
+    private func tint(for item: ExplorerFileItem) -> Color {
+        guard item.isDirectory else { return Color.secondary }
+
+        if
+            let hex = folderColors.hex(for: item.url),
+            let color = Color(nikaidoHex: hex)
+        {
+            return color
+        }
+
+        return defaultFolderColor
+    }
 
     @State private var isDropTargeted = false
     @State private var showSearch = false
@@ -1219,11 +1513,6 @@ struct ExplorerPaneView: View {
                 fileContent
             }
         }
-        .background(
-            isActive
-            ? NikaidoTheme.accent.opacity(0.035)
-            : Color.clear
-        )
         .contentShape(Rectangle())
         .onTapGesture {
             onActivate()
@@ -1231,16 +1520,16 @@ struct ExplorerPaneView: View {
         .overlay(
             Rectangle()
                 .stroke(
-                    NikaidoTheme.accent,
+                    nikaidoAccent,
                     lineWidth: isDropTargeted ? 3 : 0
                 )
                 .allowsHitTesting(false)
         )
         .overlay(alignment: .top) {
             Rectangle()
-                .fill(NikaidoTheme.gradient)
-                .frame(height: 3)
-                .opacity(isActive ? 1 : 0)
+                .fill(nikaidoAccent)
+                .frame(height: 2)
+                .opacity(isActive && showsActiveMarker ? 1 : 0)
                 .allowsHitTesting(false)
         }
     }
@@ -1248,35 +1537,43 @@ struct ExplorerPaneView: View {
     private var paneHeader: some View {
         VStack(spacing: 8) {
             HStack(spacing: 8) {
-                Button {
-                    onActivate()
-                    pane.goUp()
-                } label: {
-                    Image(systemName: "chevron.left")
+                if pane.canGoBack {
+                    Button {
+                        onActivate()
+                        pane.goBack()
+                    } label: {
+                        Image(systemName: "chevron.left")
+                    }
+                    .buttonStyle(NikaidoIconButtonStyle())
+                    .accessibilityLabel("Atrás")
                 }
-                .buttonStyle(NikaidoIconButtonStyle())
-                .disabled(!pane.canGoUp)
-                .accessibilityLabel("Subir una carpeta")
+
+                if pane.canGoForward {
+                    Button {
+                        onActivate()
+                        pane.goForward()
+                    } label: {
+                        Image(systemName: "chevron.right")
+                    }
+                    .buttonStyle(NikaidoIconButtonStyle())
+                    .accessibilityLabel("Adelante")
+                }
+
+                if pane.canGoUp {
+                    Button {
+                        onActivate()
+                        pane.goUp()
+                    } label: {
+                        Image(systemName: "arrow.up")
+                    }
+                    .buttonStyle(NikaidoIconButtonStyle())
+                    .accessibilityLabel("Subir una carpeta")
+                }
 
                 VStack(alignment: .leading, spacing: 2) {
-                    HStack(spacing: 6) {
-                        Text(pane.title)
-                            .font(.subheadline.weight(.bold))
-                            .lineLimit(1)
-
-                        if isActive {
-                            Text("ACTIVO")
-                                .font(.system(size: 9, weight: .heavy))
-                                .padding(.horizontal, 6)
-                                .padding(.vertical, 2)
-                                .background(
-                                    Capsule().fill(
-                                        NikaidoTheme.accent.opacity(0.15)
-                                    )
-                                )
-                                .foregroundStyle(NikaidoTheme.accent)
-                        }
-                    }
+                    Text(pane.title)
+                        .font(.subheadline.weight(.semibold))
+                        .lineLimit(1)
 
                     Text(pane.relativePath)
                         .font(.caption2)
@@ -1360,8 +1657,10 @@ struct ExplorerPaneView: View {
             ForEach(pane.items) { item in
                 ExplorerFileRow(
                     item: item,
+                    tint: tint(for: item),
                     selected: pane.selectedIDs.contains(item.id),
-                    selectionMode: pane.selectionMode
+                    selectionMode: pane.selectionMode,
+                    dragProvider: { dragProvider(for: item) }
                 )
                 .contentShape(Rectangle())
                 .onTapGesture {
@@ -1371,9 +1670,40 @@ struct ExplorerPaneView: View {
                     itemContextMenu(item)
                 }
                 .onDrag { dragProvider(for: item) }
+                .swipeActions(edge: .trailing, allowsFullSwipe: false) {
+                    Button(role: .destructive) {
+                        onDelete(item)
+                    } label: {
+                        Label("Eliminar", systemImage: "trash")
+                    }
+
+                    Button {
+                        onShare(item)
+                    } label: {
+                        Label("Compartir", systemImage: "square.and.arrow.up")
+                    }
+                    .tint(.blue)
+                }
+                .swipeActions(edge: .leading, allowsFullSwipe: false) {
+                    if item.isDirectory {
+                        Button {
+                            onFavorite(item)
+                        } label: {
+                            Label("Favorito", systemImage: "star")
+                        }
+                        .tint(.yellow)
+                    }
+
+                    Button {
+                        onSendToVault(item)
+                    } label: {
+                        Label("A la bóveda", systemImage: "lock.shield")
+                    }
+                    .tint(.indigo)
+                }
             }
         }
-        .onDrop(of: [UTType.nikaidoExplorerItems.identifier], isTargeted: $isDropTargeted) { providers in
+        .onDrop(of: [UTType.plainText.identifier], isTargeted: $isDropTargeted) { providers in
             onDropProviders(providers)
         }
         .listStyle(.plain)
@@ -1411,6 +1741,7 @@ struct ExplorerPaneView: View {
                     ForEach(pane.items) { item in
                         ExplorerFileGridCell(
                             item: item,
+                            tint: tint(for: item),
                             selected: pane.selectedIDs.contains(item.id),
                             selectionMode: pane.selectionMode
                         )
@@ -1427,7 +1758,7 @@ struct ExplorerPaneView: View {
                 .padding(10)
             }
         }
-        .onDrop(of: [UTType.nikaidoExplorerItems.identifier], isTargeted: $isDropTargeted) { providers in
+        .onDrop(of: [UTType.plainText.identifier], isTargeted: $isDropTargeted) { providers in
             onDropProviders(providers)
         }
         .refreshable {
@@ -1485,6 +1816,14 @@ struct ExplorerPaneView: View {
             }
         }
 
+        if !item.isDirectory && !ExplorerTextEditorView.canEdit(item) {
+            Button {
+                onEdit(item)
+            } label: {
+                Label("Editar como texto", systemImage: "square.and.pencil")
+            }
+        }
+
         Button {
             onCopyToOther(item)
         } label: {
@@ -1527,6 +1866,46 @@ struct ExplorerPaneView: View {
             )
         }
 
+        Button {
+            onSendToVault(item)
+        } label: {
+            Label("Mover a la bóveda", systemImage: "lock.shield")
+        }
+
+        if item.isDirectory {
+            Button {
+                onFavorite(item)
+            } label: {
+                Label("Añadir a favoritos", systemImage: "star")
+            }
+
+            Menu {
+                ForEach(NikaidoThemePalette.swatches) { swatch in
+                    Button {
+                        folderColors.set(swatch.hex, for: item.url)
+                    } label: {
+                        if folderColors.hex(for: item.url) == swatch.hex {
+                            Label(swatch.name, systemImage: "checkmark")
+                        } else {
+                            Text(swatch.name)
+                        }
+                    }
+                }
+
+                Button("Predeterminado") {
+                    folderColors.set(nil, for: item.url)
+                }
+            } label: {
+                Label("Color de la carpeta", systemImage: "paintpalette")
+            }
+        }
+
+        Button {
+            onInfo(item)
+        } label: {
+            Label("Información", systemImage: "info.circle")
+        }
+
         if item.isArchive {
             Button {
                 onExtract(item)
@@ -1561,9 +1940,12 @@ struct ExplorerPaneView: View {
 }
 
 private struct ExplorerFileRow: View {
+    @Environment(\.nikaidoAccent) private var nikaidoAccent
     let item: ExplorerFileItem
+    let tint: Color
     let selected: Bool
     let selectionMode: Bool
+    let dragProvider: () -> NSItemProvider
 
     var body: some View {
         HStack(spacing: 12) {
@@ -1576,7 +1958,7 @@ private struct ExplorerFileRow: View {
                 .font(.title3)
                 .foregroundStyle(
                     selected
-                    ? NikaidoTheme.accent
+                    ? nikaidoAccent
                     : Color.secondary.opacity(0.6)
                 )
                 .transition(.scale.combined(with: .opacity))
@@ -1584,8 +1966,8 @@ private struct ExplorerFileRow: View {
 
             NikaidoIconBadge(
                 systemName: item.systemImage,
-                tint: item.nikaidoTint,
-                size: 42
+                tint: tint,
+                size: 30
             )
 
             VStack(alignment: .leading, spacing: 3) {
@@ -1622,13 +2004,23 @@ private struct ExplorerFileRow: View {
                     .font(.caption.weight(.semibold))
                     .foregroundStyle(.tertiary)
             }
+
+            // Asa para arrastrar al otro panel: no choca con el menú de
+            // mantener presionado ni con el toque de la fila.
+            Image(systemName: "line.3.horizontal")
+                .font(.system(size: 15, weight: .semibold))
+                .foregroundStyle(.tertiary)
+                .frame(width: 30, height: 36)
+                .contentShape(Rectangle())
+                .onDrag { dragProvider() }
+                .accessibilityLabel("Arrastrar al otro panel")
         }
         .padding(.vertical, 4)
         .background(
             RoundedRectangle(cornerRadius: 12, style: .continuous)
                 .fill(
                     selected
-                    ? NikaidoTheme.accent.opacity(0.10)
+                    ? nikaidoAccent.opacity(0.10)
                     : Color.clear
                 )
                 .padding(.horizontal, -6)
@@ -1640,7 +2032,9 @@ private struct ExplorerFileRow: View {
 
 
 private struct ExplorerFileGridCell: View {
+    @Environment(\.nikaidoAccent) private var nikaidoAccent
     let item: ExplorerFileItem
+    let tint: Color
     let selected: Bool
     let selectionMode: Bool
 
@@ -1648,12 +2042,12 @@ private struct ExplorerFileGridCell: View {
         VStack(spacing: 8) {
             ZStack(alignment: .topTrailing) {
                 RoundedRectangle(cornerRadius: 16, style: .continuous)
-                    .fill(item.nikaidoTint.opacity(0.12))
+                    .fill(tint.opacity(0.12))
                     .aspectRatio(1.1, contentMode: .fit)
 
                 Image(systemName: item.systemImage)
                     .font(.system(size: 36, weight: .semibold))
-                    .foregroundStyle(item.nikaidoTint)
+                    .foregroundStyle(tint)
                     .frame(maxWidth: .infinity, maxHeight: .infinity)
 
                 if selectionMode {
@@ -1665,7 +2059,7 @@ private struct ExplorerFileGridCell: View {
                     .font(.title3)
                     .foregroundStyle(
                         selected
-                        ? NikaidoTheme.accent
+                        ? nikaidoAccent
                         : Color.secondary.opacity(0.7)
                     )
                     .background(Circle().fill(.background))
@@ -1689,7 +2083,7 @@ private struct ExplorerFileGridCell: View {
         .background(
             RoundedRectangle(cornerRadius: 18, style: .continuous)
                 .stroke(
-                    selected ? NikaidoTheme.accent : Color.clear,
+                    selected ? nikaidoAccent : Color.clear,
                     lineWidth: 2
                 )
         )
@@ -1873,6 +2267,7 @@ struct ExplorerStorageLocationsView: View {
 struct ExplorerSettingsView: View {
     @Binding var conflictPolicyRaw: String
     @Binding var confirmDelete: Bool
+    let trash: ExplorerTrashManager
 
     @Environment(\.dismiss) private var dismiss
 
@@ -1898,11 +2293,15 @@ struct ExplorerSettingsView: View {
                     )
                 }
 
+                NikaidoAppearanceSettingsSection()
+
+                NikaidoStorageSettingsSection(trash: trash)
+
                 Section("Paneles") {
                     Text(
-                        "En vertical puedes cambiar entre Panel 1 y Panel 2. "
-                        + "En horizontal, Nikaido Explorer muestra ambos paneles "
-                        + "simultáneamente para copiar y mover entre ellos."
+                        "El segundo panel se abre con el botón de panel dividido, "
+                        + "arriba. Úsalo para copiar y mover entre dos carpetas, "
+                        + "o arrastra un archivo por su asa al otro panel."
                     )
                     .font(.caption)
                     .foregroundStyle(.secondary)

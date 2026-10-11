@@ -46,6 +46,7 @@ struct ContentView: View {
                             mode = .secReader
                         }
                     )
+                    .environmentObject(privateVault)
 
                 case .privateVault:
                     PrivateVaultView {

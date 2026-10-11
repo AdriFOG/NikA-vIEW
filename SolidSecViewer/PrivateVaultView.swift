@@ -60,6 +60,8 @@ struct PrivateVaultView: View {
     @State private var showExporter = false
     @State private var isPreparingExport = false
     @State private var exportError: String?
+    @State private var explorerNotice: String?
+    @Environment(\.nikaidoAccent) private var nikaidoAccent
     @State private var unlockMethod: NikaidoUnlockMethod? = NikaidoUnlockPreference.method
     @State private var pendingMethodPassword: String?
     @State private var showUnlockMethodChoice = false
@@ -199,6 +201,19 @@ struct PrivateVaultView: View {
         } message: {
             Text(methodNotice ?? "")
         }
+        .alert(
+            "Guardado en Nikaido Explorer",
+            isPresented: Binding(
+                get: { explorerNotice != nil },
+                set: { if !$0 { explorerNotice = nil } }
+            )
+        ) {
+            Button("Entendido", role: .cancel) {
+                explorerNotice = nil
+            }
+        } message: {
+            Text(explorerNotice ?? "")
+        }
         .alert("Nueva carpeta", isPresented: $showNewFolder) {
             TextField("Nombre", text: $newFolderName)
 
@@ -309,10 +324,10 @@ struct PrivateVaultView: View {
                 .frame(width: 92, height: 92)
                 .background(
                     RoundedRectangle(cornerRadius: 28, style: .continuous)
-                        .fill(NikaidoTheme.gradient)
+                        .fill(nikaidoAccent)
                 )
                 .shadow(
-                    color: NikaidoTheme.accent.opacity(0.35),
+                    color: nikaidoAccent.opacity(0.35),
                     radius: 14,
                     y: 8
                 )
@@ -412,7 +427,7 @@ struct PrivateVaultView: View {
         .background(
             LinearGradient(
                 colors: [
-                    NikaidoTheme.accent.opacity(0.16),
+                    nikaidoAccent.opacity(0.16),
                     Color(uiColor: .systemBackground)
                 ],
                 startPoint: .top,
@@ -776,6 +791,19 @@ struct PrivateVaultView: View {
                 }
             }
 
+            if entry.kind == .file {
+                Button {
+                    Task {
+                        await saveToExplorer(entry)
+                    }
+                } label: {
+                    Label(
+                        "Guardar en Nikaido Explorer",
+                        systemImage: "square.and.arrow.down.on.square"
+                    )
+                }
+            }
+
             Button {
                 renameText = entry.name
                 entryToRename = entry
@@ -823,6 +851,59 @@ struct PrivateVaultView: View {
         }
 
         isPreparingExport = false
+    }
+
+    /// Descifra una copia y la guarda en la carpeta local de Nikaido Explorer.
+    @MainActor
+    private func saveToExplorer(_ entry: PrivateVaultEntry) async {
+        guard !isPreparingExport else { return }
+
+        isPreparingExport = true
+        defer { isPreparingExport = false }
+
+        do {
+            let temporary = try await vault.makeTemporaryDecryptedCopy(of: entry)
+            defer { vault.releaseTemporaryPlaintext(temporary) }
+
+            guard
+                let documents = FileManager.default.urls(
+                    for: .documentDirectory,
+                    in: .userDomainMask
+                ).first
+            else {
+                throw PrivateVaultError.notAFile
+            }
+
+            let folder = documents.appendingPathComponent(
+                "Desde la bóveda",
+                isDirectory: true
+            )
+
+            try FileManager.default.createDirectory(
+                at: folder,
+                withIntermediateDirectories: true
+            )
+
+            let stem = (entry.name as NSString).deletingPathExtension
+            let ext = (entry.name as NSString).pathExtension
+
+            var target = folder.appendingPathComponent(entry.name)
+            var counter = 2
+
+            while FileManager.default.fileExists(atPath: target.path) {
+                let candidate = ext.isEmpty
+                    ? "\(stem) \(counter)"
+                    : "\(stem) \(counter).\(ext)"
+                target = folder.appendingPathComponent(candidate)
+                counter += 1
+            }
+
+            try FileManager.default.copyItem(at: temporary, to: target)
+
+            explorerNotice = "Quedó en “Desde la bóveda” como \(target.lastPathComponent). Esta copia ya no está cifrada."
+        } catch {
+            exportError = error.localizedDescription
+        }
     }
 
     private func icon(for entry: PrivateVaultEntry) -> String {

@@ -56,10 +56,14 @@ final class SecurityScopedFolderStore: ObservableObject {
         // startAccessingSecurityScopedResource() even while coordinated access
         // is valid, so verify actual directory access before rejecting it.
         let startedScope = normalized.startAccessingSecurityScopedResource()
+        let probe = probeDirectoryAccessDetailed(normalized)
 
-        guard startedScope || probeDirectoryAccess(normalized) else {
+        guard startedScope || probe.ok else {
             lastError = "iOS no concedió acceso utilizable a esa carpeta. "
-                + "Vuelve a seleccionarla desde Archivos e inténtalo otra vez."
+                + "Vuelve a seleccionarla desde Archivos e inténtalo otra vez.\n\n"
+                + "Detalle técnico: permiso del selector = "
+                + (startedScope ? "sí" : "no")
+                + "; lectura = \(probe.detail); ruta = \(normalized.path)"
             return nil
         }
 
@@ -248,6 +252,31 @@ final class SecurityScopedFolderStore: ObservableObject {
         if changed || records.count != loadSavedRecords().count {
             persist(records)
         }
+    }
+
+    /// Primero intenta listar la carpeta directamente (lo más tolerante) y, si
+    /// falla, usa coordinación de archivos. Devuelve el motivo para diagnóstico.
+    private func probeDirectoryAccessDetailed(_ url: URL) -> (ok: Bool, detail: String) {
+        var details: [String] = []
+
+        do {
+            _ = try FileManager.default.contentsOfDirectory(
+                at: url,
+                includingPropertiesForKeys: nil,
+                options: []
+            )
+            return (true, "directa ok")
+        } catch {
+            let ns = error as NSError
+            details.append("directa: \(ns.domain) \(ns.code)")
+        }
+
+        if probeDirectoryAccess(url) {
+            return (true, "coordinada ok")
+        }
+
+        details.append("coordinada: falló")
+        return (false, details.joined(separator: ", "))
     }
 
     private func probeDirectoryAccess(_ url: URL) -> Bool {
