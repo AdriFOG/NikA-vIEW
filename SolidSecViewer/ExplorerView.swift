@@ -1,6 +1,7 @@
 import SwiftUI
 import UIKit
 import UniformTypeIdentifiers
+import QuickLookThumbnailing
 
 private enum ExplorerNewItemKind: String, Identifiable {
     case textDocument
@@ -330,8 +331,7 @@ struct ExplorerView: View {
             )
         }
         .sheet(item: $previewTarget) { target in
-            ExplorerQuickLookView(url: target.url)
-                .ignoresSafeArea()
+            ExplorerPreviewSheet(url: target.url)
         }
         .sheet(isPresented: $showShareSheet) {
             ExplorerShareSheet(urls: shareURLs)
@@ -1523,6 +1523,8 @@ struct ExplorerPaneView: View {
 
     @State private var isDropTargeted = false
     @State private var showSearch = false
+    @AppStorage("NikaidoExplorer.showMediaThumbnails")
+    private var showMediaThumbnails = true
 
     var body: some View {
         VStack(spacing: 0) {
@@ -1687,6 +1689,7 @@ struct ExplorerPaneView: View {
                     tint: tint(for: item),
                     selected: pane.selectedIDs.contains(item.id),
                     selectionMode: pane.selectionMode,
+                    showMediaThumbnails: showMediaThumbnails,
                     dragProvider: { dragProvider(for: item) }
                 )
                 .contentShape(Rectangle())
@@ -1770,7 +1773,8 @@ struct ExplorerPaneView: View {
                             item: item,
                             tint: tint(for: item),
                             selected: pane.selectedIDs.contains(item.id),
-                            selectionMode: pane.selectionMode
+                            selectionMode: pane.selectionMode,
+                            showMediaThumbnails: showMediaThumbnails
                         )
                         .contentShape(Rectangle())
                         .onTapGesture {
@@ -1966,12 +1970,91 @@ struct ExplorerPaneView: View {
     }
 }
 
+private struct ExplorerMediaThumbnail: View {
+    let item: ExplorerFileItem
+    let tint: Color
+
+    @State private var image: UIImage?
+    @State private var isLoading = false
+
+    var body: some View {
+        ZStack {
+            tint.opacity(0.12)
+
+            if let image {
+                Image(uiImage: image)
+                    .resizable()
+                    .scaledToFill()
+                    .frame(maxWidth: .infinity, maxHeight: .infinity)
+                    .clipped()
+            } else {
+                Image(systemName: item.systemImage)
+                    .font(.system(size: 26, weight: .semibold))
+                    .foregroundStyle(tint)
+            }
+
+            if isLoading && image == nil {
+                ProgressView()
+                    .controlSize(.small)
+                    .tint(.white)
+                    .padding(6)
+                    .background(.black.opacity(0.42), in: Circle())
+            }
+
+            if item.isVideo {
+                Image(systemName: "play.circle.fill")
+                    .font(.system(size: image == nil ? 26 : 32))
+                    .foregroundStyle(.white)
+                    .shadow(radius: 3)
+                    .opacity(isLoading && image == nil ? 0.45 : 0.95)
+            }
+        }
+        .task(id: item.id) {
+            image = nil
+
+            guard item.hasMediaThumbnail else { return }
+
+            isLoading = true
+            defer { isLoading = false }
+
+            let thumbnail = await ExplorerMediaThumbnailGenerator.thumbnail(
+                for: item.url,
+                size: CGSize(width: 360, height: 360)
+            )
+
+            guard !Task.isCancelled else { return }
+            image = thumbnail
+        }
+    }
+}
+
+@MainActor
+private enum ExplorerMediaThumbnailGenerator {
+    static func thumbnail(for url: URL, size: CGSize) async -> UIImage? {
+        let request = QLThumbnailGenerator.Request(
+            fileAt: url,
+            size: size,
+            scale: 2,
+            representationTypes: .thumbnail
+        )
+
+        return await withCheckedContinuation { continuation in
+            QLThumbnailGenerator.shared.generateBestRepresentation(
+                for: request
+            ) { representation, _ in
+                continuation.resume(returning: representation?.uiImage)
+            }
+        }
+    }
+}
+
 private struct ExplorerFileRow: View {
     @Environment(\.nikaidoAccent) private var nikaidoAccent
     let item: ExplorerFileItem
     let tint: Color
     let selected: Bool
     let selectionMode: Bool
+    let showMediaThumbnails: Bool
     let dragProvider: () -> NSItemProvider
 
     var body: some View {
@@ -1991,11 +2074,17 @@ private struct ExplorerFileRow: View {
                 .transition(.scale.combined(with: .opacity))
             }
 
-            NikaidoIconBadge(
-                systemName: item.systemImage,
-                tint: tint,
-                size: 30
-            )
+            if item.hasMediaThumbnail && showMediaThumbnails {
+                ExplorerMediaThumbnail(item: item, tint: tint)
+                    .frame(width: 44, height: 40)
+                    .clipShape(RoundedRectangle(cornerRadius: 9))
+            } else {
+                NikaidoIconBadge(
+                    systemName: item.systemImage,
+                    tint: tint,
+                    size: 30
+                )
+            }
 
             VStack(alignment: .leading, spacing: 3) {
                 Text(item.name)
@@ -2064,6 +2153,7 @@ private struct ExplorerFileGridCell: View {
     let tint: Color
     let selected: Bool
     let selectionMode: Bool
+    let showMediaThumbnails: Bool
 
     var body: some View {
         VStack(spacing: 8) {
@@ -2072,10 +2162,17 @@ private struct ExplorerFileGridCell: View {
                     .fill(tint.opacity(0.12))
                     .aspectRatio(1.1, contentMode: .fit)
 
-                Image(systemName: item.systemImage)
-                    .font(.system(size: 36, weight: .semibold))
-                    .foregroundStyle(tint)
-                    .frame(maxWidth: .infinity, maxHeight: .infinity)
+                if item.hasMediaThumbnail && showMediaThumbnails {
+                    ExplorerMediaThumbnail(item: item, tint: tint)
+                        .clipShape(
+                            RoundedRectangle(cornerRadius: 16, style: .continuous)
+                        )
+                } else {
+                    Image(systemName: item.systemImage)
+                        .font(.system(size: 36, weight: .semibold))
+                        .foregroundStyle(tint)
+                        .frame(maxWidth: .infinity, maxHeight: .infinity)
+                }
 
                 if selectionMode {
                     Image(
@@ -2297,6 +2394,8 @@ struct ExplorerSettingsView: View {
     let trash: ExplorerTrashManager
 
     @Environment(\.dismiss) private var dismiss
+    @AppStorage("NikaidoExplorer.showMediaThumbnails")
+    private var showMediaThumbnails = true
 
     var body: some View {
         NavigationView {
@@ -2321,6 +2420,19 @@ struct ExplorerSettingsView: View {
                 }
 
                 NikaidoAppearanceSettingsSection()
+
+                Section("Vista de archivos") {
+                    Toggle(
+                        "Mostrar portadas de fotos y videos",
+                        isOn: $showMediaThumbnails
+                    )
+
+                    Text(
+                        "Genera una miniatura para imágenes y videos en las vistas de lista y cuadrícula."
+                    )
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+                }
 
                 NikaidoStorageSettingsSection(trash: trash)
 

@@ -42,6 +42,23 @@ struct ExplorerFileItem: Identifiable, Hashable, Sendable {
         ["zip", "7z", "rar"].contains(pathExtension)
     }
 
+    var isImage: Bool {
+        !isDirectory && [
+            "jpg", "jpeg", "png", "gif", "webp", "heic", "heif", "bmp",
+            "tif", "tiff"
+        ].contains(pathExtension)
+    }
+
+    var isVideo: Bool {
+        !isDirectory && [
+            "mp4", "mov", "m4v", "mkv", "avi", "webm", "3gp"
+        ].contains(pathExtension)
+    }
+
+    var hasMediaThumbnail: Bool {
+        isImage || isVideo
+    }
+
     var systemImage: String {
         if isDirectory {
             return "folder.fill"

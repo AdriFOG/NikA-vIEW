@@ -9,6 +9,7 @@ trash = (APP / "ExplorerTrashManager.swift").read_text(encoding="utf-8")
 drag = (APP / "ExplorerDragDrop.swift").read_text(encoding="utf-8")
 smb = (APP / "ExplorerSMB.swift").read_text(encoding="utf-8")
 extras = (APP / "NikaidoExtras.swift").read_text(encoding="utf-8")
+preview = (APP / "ExplorerPreviewAndShare.swift").read_text(encoding="utf-8")
 
 checks = {
     "drag type": "com.teamnikaido.explorer-items" in drag,
@@ -16,6 +17,9 @@ checks = {
     "async-safe drag lock": "lock.withLock" in drag,
     "split SwiftUI composition": "lifecycleConfiguredExplorer" in view and "explorerLayout" in view,
     "editor limit is nonisolated": "ExplorerTextEditorLimits.maximumBytes" in extras,
+    "preview has close control": "ExplorerPreviewSheet" in preview and "dismiss()" in preview,
+    "media thumbnail preference": "showMediaThumbnails" in view,
+    "media thumbnail generator": "QLThumbnailGenerator" in view,
     "queue serial worker": "while !pending.isEmpty" in queue and "removeFirst()" in queue,
     "queue UI": "Cola de operaciones" in view,
     "trash hidden root": '.NikaidoTrash' in trash,

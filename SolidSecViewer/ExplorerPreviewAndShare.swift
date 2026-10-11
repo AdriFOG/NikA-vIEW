@@ -20,6 +20,36 @@ struct ExplorerShareSheet: UIViewControllerRepresentable {
     ) {}
 }
 
+/// A Quick Look controller has no SwiftUI dismissal control when it is hosted
+/// inside a sheet. Keep a native close action above it so every preview,
+/// including archives that only show metadata, can always be dismissed.
+struct ExplorerPreviewSheet: View {
+    @Environment(\.dismiss) private var dismiss
+
+    let url: URL
+
+    var body: some View {
+        ZStack(alignment: .topTrailing) {
+            ExplorerQuickLookView(url: url)
+                .ignoresSafeArea()
+
+            Button {
+                dismiss()
+            } label: {
+                Image(systemName: "xmark")
+                    .font(.system(size: 15, weight: .bold))
+                    .foregroundStyle(.primary)
+                    .frame(width: 38, height: 38)
+                    .background(.ultraThinMaterial, in: Circle())
+                    .shadow(radius: 3)
+            }
+            .padding(.top, 12)
+            .padding(.trailing, 16)
+            .accessibilityLabel("Cerrar vista previa")
+        }
+    }
+}
+
 struct ExplorerQuickLookView: UIViewControllerRepresentable {
     let url: URL
 
