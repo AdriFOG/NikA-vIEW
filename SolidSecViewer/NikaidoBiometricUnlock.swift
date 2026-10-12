@@ -148,3 +148,75 @@ enum NikaidoUnlockPreference {
         SecItemDelete(query as CFDictionary)
     }
 }
+
+
+// MARK: - Autenticación al abrir archivos de la bóveda
+
+enum NikaidoFileAuthResult {
+    case success
+    case cancelled
+    case needsPassword
+}
+
+/// Segunda barrera al abrir contenido de la bóveda: Face ID o, si no está
+/// disponible, la contraseña de la bóveda. Nada se descifra para mostrarse
+/// hasta que esta verificación tenga éxito.
+enum NikaidoFileAuth {
+    private static let requireKey = "NikaidoVault.requireFileAuth.v1"
+    private static let graceKey = "NikaidoVault.fileAuthGraceSeconds.v1"
+    private static var lastSuccess: Date?
+
+    static var isRequired: Bool {
+        UserDefaults.standard.object(forKey: requireKey) as? Bool ?? true
+    }
+
+    static var graceSeconds: Int {
+        UserDefaults.standard.integer(forKey: graceKey)
+    }
+
+    static var isWithinGrace: Bool {
+        guard graceSeconds > 0, let lastSuccess else { return false }
+        return Date().timeIntervalSince(lastSuccess) < Double(graceSeconds)
+    }
+
+    static func markAuthenticated() {
+        lastSuccess = Date()
+    }
+
+    static func reset() {
+        lastSuccess = nil
+    }
+
+    static func authenticate(reason: String) async -> NikaidoFileAuthResult {
+        guard
+            NikaidoUnlockPreference.method == .faceID,
+            NikaidoUnlockPreference.biometricsAvailable
+        else {
+            return .needsPassword
+        }
+
+        let context = LAContext()
+        context.localizedFallbackTitle = "Usar contraseña"
+
+        return await withCheckedContinuation { continuation in
+            context.evaluatePolicy(
+                .deviceOwnerAuthenticationWithBiometrics,
+                localizedReason: reason
+            ) { success, error in
+                if success {
+                    continuation.resume(returning: .success)
+                    return
+                }
+
+                let code = (error as? LAError)?.code
+
+                switch code {
+                case .userCancel, .systemCancel, .appCancel:
+                    continuation.resume(returning: .cancelled)
+                default:
+                    continuation.resume(returning: .needsPassword)
+                }
+            }
+        }
+    }
+}

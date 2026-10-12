@@ -148,7 +148,7 @@ final class ExplorerPaneState: ObservableObject, Identifiable {
                 await refresh()
             }
         } catch {
-            errorMessage = error.localizedDescription
+            errorMessage = ExplorerErrorText.message(for: error)
         }
     }
 
@@ -169,7 +169,7 @@ final class ExplorerPaneState: ObservableObject, Identifiable {
                 await refresh()
             }
         } catch {
-            errorMessage = error.localizedDescription
+            errorMessage = ExplorerErrorText.message(for: error)
         }
     }
 
@@ -262,7 +262,7 @@ final class ExplorerPaneState: ObservableObject, Identifiable {
             )
         } catch {
             if generation == refreshGeneration {
-                errorMessage = error.localizedDescription
+                errorMessage = ExplorerErrorText.message(for: error)
                 items = []
             }
         }

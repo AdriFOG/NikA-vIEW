@@ -11,6 +11,7 @@ private struct SavedExplorerLocation: Codable {
 final class SecurityScopedFolderStore: ObservableObject {
     @Published private(set) var locations: [ExplorerStorageLocation] = []
     @Published var lastError: String?
+    @Published private(set) var unavailable: [ExplorerUnavailableLocation] = []
 
     private let defaultsKey = "NikaidoExplorer.AuthorizedLocations.v1"
     private var scopedURLs: [UUID: URL] = [:]
@@ -34,10 +35,12 @@ final class SecurityScopedFolderStore: ObservableObject {
     func addAuthorizedFolder(_ url: URL) -> ExplorerStorageLocation? {
         lastError = nil
 
-        let normalized = url.standardizedFileURL
+        let picked = url.standardizedFileURL
 
+        // Misma carpeta aunque iOS la entregue con otra ruta (por ejemplo
+        // /var frente a /private/var): se compara también la identidad real.
         if let existing = locations.first(where: {
-            canonical($0.rootURL) == canonical(normalized)
+            isSameFolder($0.rootURL, picked)
         }) {
             return existing
         }
@@ -46,7 +49,7 @@ final class SecurityScopedFolderStore: ObservableObject {
         // not need a sandbox extension and should not be duplicated as an
         // "external" location.
         if let local = localLocation,
-           isDescendant(canonical(normalized), of: canonical(local.rootURL))
+           isDescendant(canonical(picked), of: canonical(local.rootURL))
         {
             return local
         }
@@ -55,12 +58,42 @@ final class SecurityScopedFolderStore: ObservableObject {
         // File Provider/bookmark paths can nevertheless report `false` from
         // startAccessingSecurityScopedResource() even while coordinated access
         // is valid, so verify actual directory access before rejecting it.
-        let startedScope = normalized.startAccessingSecurityScopedResource()
-        let probe = probeDirectoryAccessDetailed(normalized)
+        var normalized = picked
+        var startedScope = normalized.startAccessingSecurityScopedResource()
+        var probe = probeDirectoryAccessDetailed(normalized)
+
+        if !startedScope && !probe.ok {
+            // Segunda vía: pasar la URL por un bookmark. En algunas
+            // ubicaciones locales la URL resuelta sí conserva el permiso que
+            // concedió el selector de iOS.
+            if let data = try? makeBookmark(for: picked) {
+                var stale = false
+
+                if let resolved = try? URL(
+                    resolvingBookmarkData: data,
+                    options: [.withoutUI],
+                    relativeTo: nil,
+                    bookmarkDataIsStale: &stale
+                ) {
+                    let candidate = resolved.standardizedFileURL
+                    let candidateScope = candidate.startAccessingSecurityScopedResource()
+                    let candidateProbe = probeDirectoryAccessDetailed(candidate)
+                    _ = stale
+
+                    if candidateScope || candidateProbe.ok {
+                        normalized = candidate
+                        startedScope = candidateScope
+                        probe = candidateProbe
+                    }
+                }
+            }
+        }
 
         guard startedScope || probe.ok else {
             lastError = "iOS no concedió acceso utilizable a esa carpeta. "
-                + "Vuelve a seleccionarla desde Archivos e inténtalo otra vez.\n\n"
+                + "Elige una carpeta de Archivos que hayas creado tú (en iCloud Drive "
+                + "o en \"En mi iPhone\"); iOS no permite carpetas del sistema ni de "
+                + "otras apps.\n\n"
                 + "Detalle técnico: permiso del selector = "
                 + (startedScope ? "sí" : "no")
                 + "; lectura = \(probe.detail); ruta = \(normalized.path)"
@@ -85,6 +118,18 @@ final class SecurityScopedFolderStore: ObservableObject {
             saved.removeAll(where: {
                 resolvedPath(for: $0) == normalized.path
             })
+
+            // Volver a autorizar una carpeta cuya referencia había caducado
+            // reemplaza esa referencia en lugar de dejar un duplicado.
+            let replacedIDs = Set(
+                unavailable.filter { $0.name == name }.map(\.id)
+            )
+
+            if !replacedIDs.isEmpty {
+                saved.removeAll(where: { replacedIDs.contains($0.id) })
+                unavailable.removeAll(where: { replacedIDs.contains($0.id) })
+            }
+
             saved.append(
                 SavedExplorerLocation(
                     id: id,
@@ -99,7 +144,7 @@ final class SecurityScopedFolderStore: ObservableObject {
             // that explicit instead of discarding a folder the user just chose.
             lastError = "La carpeta quedó autorizada para esta sesión, pero "
                 + "iOS no permitió guardar el acceso para próximos inicios: "
-                + error.localizedDescription
+                + ExplorerErrorText.message(for: error)
         }
 
         let location = ExplorerStorageLocation(
@@ -111,6 +156,88 @@ final class SecurityScopedFolderStore: ObservableObject {
         )
         locations.append(location)
         return location
+    }
+
+    /// Quita una referencia caducada de la lista y de los datos guardados.
+    func removeUnavailable(_ item: ExplorerUnavailableLocation) {
+        unavailable.removeAll(where: { $0.id == item.id })
+
+        var saved = loadSavedRecords()
+        saved.removeAll(where: { $0.id == item.id })
+        persist(saved)
+    }
+
+    /// Vuelve a intentar abrir las referencias que no estaban disponibles
+    /// (por ejemplo, porque un disco o iCloud tardó en responder).
+    func retryUnavailable() {
+        let pending = Set(unavailable.map(\.id))
+        guard !pending.isEmpty else { return }
+
+        let records = loadSavedRecords().filter { pending.contains($0.id) }
+        var stillUnavailable: [ExplorerUnavailableLocation] = []
+
+        for record in records {
+            var stale = false
+
+            guard let resolved = try? URL(
+                resolvingBookmarkData: record.bookmarkData,
+                options: [.withoutUI],
+                relativeTo: nil,
+                bookmarkDataIsStale: &stale
+            ) else {
+                stillUnavailable.append(
+                    ExplorerUnavailableLocation(
+                        id: record.id,
+                        name: record.name,
+                        reason: "La carpeta se movió, se eliminó o su referencia caducó."
+                    )
+                )
+                continue
+            }
+
+            let url = resolved.standardizedFileURL
+            let startedScope = url.startAccessingSecurityScopedResource()
+
+            guard startedScope || probeDirectoryAccess(url) else {
+                stillUnavailable.append(
+                    ExplorerUnavailableLocation(
+                        id: record.id,
+                        name: record.name,
+                        reason: "iOS no da acceso a esta carpeta ahora. Vuelve a añadirla desde Archivos."
+                    )
+                )
+                continue
+            }
+
+            if startedScope {
+                scopedURLs[record.id] = url
+            }
+
+            if stale, let refreshed = try? makeBookmark(for: url) {
+                var saved = loadSavedRecords()
+
+                if let index = saved.firstIndex(where: { $0.id == record.id }) {
+                    saved[index] = SavedExplorerLocation(
+                        id: record.id,
+                        name: record.name,
+                        bookmarkData: refreshed
+                    )
+                    persist(saved)
+                }
+            }
+
+            locations.append(
+                ExplorerStorageLocation(
+                    id: record.id,
+                    name: record.name,
+                    rootURL: url,
+                    kind: .authorized,
+                    isPersistentReference: !stale
+                )
+            )
+        }
+
+        unavailable = stillUnavailable
     }
 
     func remove(_ location: ExplorerStorageLocation) {
@@ -153,6 +280,10 @@ final class SecurityScopedFolderStore: ObservableObject {
             if location.rootURL.startAccessingSecurityScopedResource() {
                 scopedURLs[location.id] = location.rootURL
             }
+        }
+
+        if !unavailable.isEmpty {
+            retryUnavailable()
         }
     }
 
@@ -197,9 +328,16 @@ final class SecurityScopedFolderStore: ObservableObject {
                 let startedScope = url.startAccessingSecurityScopedResource()
 
                 guard startedScope || probeDirectoryAccess(url) else {
-                    // Keep the bookmark so the user can re-authorize manually;
-                    // do not expose a dead location in the live UI.
+                    // Keep the bookmark so the user can retry or remove it;
+                    // it is listed as unavailable, not as a live location.
                     refreshedRecords.append(record)
+                    unavailable.append(
+                        ExplorerUnavailableLocation(
+                            id: record.id,
+                            name: record.name,
+                            reason: "iOS no da acceso a esta carpeta ahora. Vuelve a añadirla desde Archivos."
+                        )
+                    )
                     continue
                 }
 
@@ -235,14 +373,27 @@ final class SecurityScopedFolderStore: ObservableObject {
                     )
                 )
             } catch {
-                // A malformed/unresolvable bookmark cannot safely be used.
-                changed = true
+                // The folder was moved/deleted or the bookmark expired. Keep
+                // the record visible so the user can see it and remove it.
+                refreshedRecords.append(record)
+                unavailable.append(
+                    ExplorerUnavailableLocation(
+                        id: record.id,
+                        name: record.name,
+                        reason: "La carpeta se movió, se eliminó o su referencia caducó."
+                    )
+                )
             }
         }
 
         // De-duplicate old records that may have accumulated before v0.9.
+        let unavailableIDs = Set(unavailable.map(\.id))
         var seenPaths = Set<String>()
         records = refreshedRecords.filter { record in
+            if unavailableIDs.contains(record.id) {
+                return true
+            }
+
             guard let path = resolvedPath(for: record) else {
                 return false
             }
@@ -355,6 +506,27 @@ final class SecurityScopedFolderStore: ObservableObject {
             relativeTo: nil,
             bookmarkDataIsStale: &stale
         ).standardizedFileURL.path
+    }
+
+    private func resourceIdentifier(_ url: URL) -> NSObjectProtocol? {
+        (try? url.resourceValues(
+            forKeys: [.fileResourceIdentifierKey]
+        ))?.fileResourceIdentifier
+    }
+
+    private func isSameFolder(_ lhs: URL, _ rhs: URL) -> Bool {
+        if canonical(lhs) == canonical(rhs) {
+            return true
+        }
+
+        guard
+            let first = resourceIdentifier(lhs),
+            let second = resourceIdentifier(rhs)
+        else {
+            return false
+        }
+
+        return first.isEqual(second)
     }
 
     private func canonical(_ url: URL) -> URL {

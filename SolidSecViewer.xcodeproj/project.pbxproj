@@ -51,6 +51,7 @@
         A901 /* NikaidoBiometricUnlock.swift in Sources */ = {isa = PBXBuildFile; fileRef = B901 /* NikaidoBiometricUnlock.swift */; };
         A902 /* NikaidoTheme.swift in Sources */ = {isa = PBXBuildFile; fileRef = B902 /* NikaidoTheme.swift */; };
         A903 /* NikaidoExtras.swift in Sources */ = {isa = PBXBuildFile; fileRef = B903 /* NikaidoExtras.swift */; };
+        A904 /* ExplorerGlobalFiles.swift in Sources */ = {isa = PBXBuildFile; fileRef = B904 /* ExplorerGlobalFiles.swift */; };
         A044 /* ExplorerSMB.swift in Sources */ = {isa = PBXBuildFile; fileRef = B042 /* ExplorerSMB.swift */; };
         A045 /* AMSMB2 in Frameworks */ = {isa = PBXBuildFile; productRef = Z004 /* AMSMB2 */; };
         A046 /* AMSMB2 in Embed Frameworks */ = {isa = PBXBuildFile; productRef = Z004 /* AMSMB2 */; settings = {ATTRIBUTES = (CodeSignOnCopy, RemoveHeadersOnCopy, ); }; };
@@ -100,6 +101,7 @@
         B901 = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = NikaidoBiometricUnlock.swift; sourceTree = "<group>"; };
         B902 = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = NikaidoTheme.swift; sourceTree = "<group>"; };
         B903 = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = NikaidoExtras.swift; sourceTree = "<group>"; };
+        B904 = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ExplorerGlobalFiles.swift; sourceTree = "<group>"; };
         B042 = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ExplorerSMB.swift; sourceTree = "<group>"; };
         B100 = {isa = PBXFileReference; explicitFileType = wrapper.application; includeInIndex = 0; path = SolidSecViewer.app; sourceTree = BUILT_PRODUCTS_DIR; };
 /* End PBXFileReference section */
@@ -144,7 +146,7 @@
         D002 = {
             isa = PBXGroup;
             children = (
-                B001, B002, B003, B004, B005, B006, B007, B008, B009, B010, B011, B012, B013, B014, B015, B016,  B018, B019, B020, B021, B022, B023, B024, B025, B026, B027, B028, B029, B030, B031, B032, B033, B034, B035, B036, B037, B038, B039, B040, B041, B042, B901, B902, B903,
+                B001, B002, B003, B004, B005, B006, B007, B008, B009, B010, B011, B012, B013, B014, B015, B016,  B018, B019, B020, B021, B022, B023, B024, B025, B026, B027, B028, B029, B030, B031, B032, B033, B034, B035, B036, B037, B038, B039, B040, B041, B042, B901, B902, B903, B904,
             );
             path = SolidSecViewer;
             sourceTree = "<group>";
@@ -223,7 +225,7 @@
         C002 = {
             isa = PBXSourcesBuildPhase;
             buildActionMask = 2147483647;
-            files = (A001,A002,A003,A004,A005,A006,A007,A008,A009,A010,A011,A012,A013,A014,A016,A018,A019,A020,A021,A022,A023,A024,A025,A026,A027,A028,A029,A032,A033,A034,A035,A036,A037,A038,A039,A040,A041,A042,A043,A044,A901,A902,A903,);
+            files = (A001,A002,A003,A004,A005,A006,A007,A008,A009,A010,A011,A012,A013,A014,A016,A018,A019,A020,A021,A022,A023,A024,A025,A026,A027,A028,A029,A032,A033,A034,A035,A036,A037,A038,A039,A040,A041,A042,A043,A044,A901,A902,A903,A904,);
             runOnlyForDeploymentPostprocessing = 0;
         };
 /* End PBXSourcesBuildPhase section */

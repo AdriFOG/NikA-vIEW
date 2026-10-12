@@ -101,6 +101,8 @@ struct ExplorerView: View {
     @State private var splitHint: String?
     @State private var showFileImporter = false
     @State private var editorTarget: ExplorerEditorTarget?
+    @State private var showGlobalFiles = false
+    @StateObject private var globalIndex = ExplorerGlobalIndex()
     @State private var infoTarget: ExplorerFileItem?
     @State private var vaultSendItems: [ExplorerFileItem] = []
     @State private var vaultSendPane = 0
@@ -312,6 +314,14 @@ struct ExplorerView: View {
         vaultPresentedExplorer
         .sheet(isPresented: $showOperations) {
             ExplorerOperationQueueView(queue: operationQueue)
+        }
+        .sheet(isPresented: $showGlobalFiles) {
+            ExplorerGlobalFilesView(
+                index: globalIndex,
+                locations: locations.locations
+            ) { result in
+                revealGlobalResult(result)
+            }
         }
         .sheet(isPresented: $showTrash) {
             ExplorerTrashView(trash: trash) {
@@ -573,6 +583,15 @@ struct ExplorerView: View {
             .accessibilityLabel(splitOpen ? "Cerrar segundo panel" : "Abrir segundo panel")
 
             Menu {
+                Button {
+                    showGlobalFiles = true
+                } label: {
+                    Label(
+                        "Todos los archivos",
+                        systemImage: "square.stack"
+                    )
+                }
+
                 Section("Archivos") {
                     Button {
                         newFolderName = ""
@@ -621,7 +640,7 @@ struct ExplorerView: View {
                                 folderURL: currentURL
                             )
                         } catch {
-                            globalError = error.localizedDescription
+                            globalError = ExplorerErrorText.message(for: error)
                         }
                     } label: {
                         Label(
@@ -798,6 +817,20 @@ struct ExplorerView: View {
         .padding(.vertical, 6)
     }
 
+    /// Abre la carpeta de origen de un resultado del filtro global.
+    private func revealGlobalResult(_ result: ExplorerGlobalFileResult) {
+        guard
+            let location = locations.locations.first(where: {
+                $0.id == result.locationID
+            })
+        else {
+            return
+        }
+
+        showGlobalFiles = false
+        active.openLocation(location, folderURL: result.folderURL)
+    }
+
     private func checkSpaceWarnings() async {
         guard !spaceChecked else { return }
         spaceChecked = true
@@ -839,7 +872,7 @@ struct ExplorerView: View {
         do {
             try favorites.add(location: location, folderURL: item.url)
         } catch {
-            globalError = error.localizedDescription
+            globalError = ExplorerErrorText.message(for: error)
         }
     }
 
@@ -958,7 +991,7 @@ struct ExplorerView: View {
                 }
                 await targetPane.refresh()
             } catch {
-                globalError = error.localizedDescription
+                globalError = ExplorerErrorText.message(for: error)
             }
         }
     }
@@ -1229,7 +1262,7 @@ struct ExplorerView: View {
                 )
                 await targetPane.refresh()
             } catch {
-                globalError = error.localizedDescription
+                globalError = ExplorerErrorText.message(for: error)
             }
         }
     }
@@ -1257,7 +1290,7 @@ struct ExplorerView: View {
                 )
                 await active.refresh()
             } catch {
-                globalError = error.localizedDescription
+                globalError = ExplorerErrorText.message(for: error)
             }
         }
     }
@@ -1289,7 +1322,7 @@ struct ExplorerView: View {
                 )
                 await targetPane.refresh()
             } catch {
-                globalError = error.localizedDescription
+                globalError = ExplorerErrorText.message(for: error)
             }
         }
     }
@@ -1390,7 +1423,7 @@ struct ExplorerView: View {
                 }
                 transfer(dragged, fromPane: payload.sourcePane, moving: true)
             } catch {
-                globalError = error.localizedDescription
+                globalError = ExplorerErrorText.message(for: error)
             }
         }
         return true
@@ -1423,7 +1456,7 @@ struct ExplorerView: View {
                 )
                 await targetPane.refresh()
             } catch {
-                globalError = error.localizedDescription
+                globalError = ExplorerErrorText.message(for: error)
             }
         }
     }
@@ -1477,7 +1510,7 @@ struct ExplorerView: View {
 
                 await targetPane.refresh()
             } catch {
-                globalError = error.localizedDescription
+                globalError = ExplorerErrorText.message(for: error)
             }
         }
     }
@@ -1970,14 +2003,21 @@ struct ExplorerPaneView: View {
     }
 }
 
-private struct ExplorerMediaThumbnail: View {
+struct ExplorerMediaThumbnail: View {
     let item: ExplorerFileItem
     let tint: Color
 
     @State private var image: UIImage?
     @State private var isLoading = false
 
-    var body: some View {
+    init(item: ExplorerFileItem, tint: Color) {
+        self.item = item
+        self.tint = tint
+    }
+
+    /// La miniatura se dibuja sobre un contenedor flexible (`Color.clear`):
+    /// el tamaño lo decide la celda, no la imagen, y lo que sobra se recorta.
+    private var thumbnailContent: some View {
         ZStack {
             tint.opacity(0.12)
 
@@ -2009,6 +2049,14 @@ private struct ExplorerMediaThumbnail: View {
                     .opacity(isLoading && image == nil ? 0.45 : 0.95)
             }
         }
+    }
+
+    var body: some View {
+        Color.clear
+            .overlay {
+                thumbnailContent
+            }
+            .clipped()
         .task(id: item.id) {
             image = nil
 
@@ -2297,11 +2345,8 @@ struct ExplorerStorageLocationsView: View {
                             dismiss()
                         } label: {
                             HStack {
-                                Image(
-                                    systemName: location.kind == .local
-                                    ? "iphone"
-                                    : "externaldrive"
-                                )
+                                Image(systemName: location.source.symbol)
+                                    .frame(width: 24)
 
                                 VStack(alignment: .leading) {
                                     Text(location.name)
@@ -2310,8 +2355,8 @@ struct ExplorerStorageLocationsView: View {
                                         location.kind == .local
                                         ? "Almacenamiento de Nikaido Explorer"
                                         : location.isPersistentReference
-                                            ? "Carpeta autorizada por iOS"
-                                            : "Autorizada solo para esta sesión"
+                                            ? location.source.title
+                                            : location.source.title + " · solo esta sesión"
                                     )
                                     .font(.caption)
                                     .foregroundStyle(.secondary)
@@ -2332,6 +2377,41 @@ struct ExplorerStorageLocationsView: View {
                                     Label("Quitar", systemImage: "trash")
                                 }
                             }
+                        }
+                    }
+                }
+
+                if !locations.unavailable.isEmpty {
+                    Section("No disponibles") {
+                        ForEach(locations.unavailable) { item in
+                            HStack(alignment: .top, spacing: 10) {
+                                Image(systemName: "exclamationmark.triangle.fill")
+                                    .foregroundStyle(.orange)
+
+                                VStack(alignment: .leading, spacing: 2) {
+                                    Text(item.name)
+
+                                    Text(item.reason)
+                                        .font(.caption)
+                                        .foregroundStyle(.secondary)
+                                }
+                            }
+                            .swipeActions {
+                                Button(role: .destructive) {
+                                    locations.removeUnavailable(item)
+                                } label: {
+                                    Label("Quitar", systemImage: "trash")
+                                }
+                            }
+                        }
+
+                        Button {
+                            locations.retryUnavailable()
+                        } label: {
+                            Label(
+                                "Reintentar acceso",
+                                systemImage: "arrow.clockwise"
+                            )
                         }
                     }
                 }

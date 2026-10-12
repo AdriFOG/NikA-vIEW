@@ -799,3 +799,41 @@ struct NikaidoStorageSettingsSection: View {
         }.value
     }
 }
+
+
+// MARK: - Mensajes de error comprensibles
+
+enum ExplorerErrorText {
+    private static let permissionText =
+        "iOS no permite hacer esto en esa carpeta. Puede ser del sistema, estar "
+        + "en modo solo lectura o haber perdido el permiso. Vuelve a añadirla "
+        + "desde Archivos o usa una carpeta que hayas creado tú."
+
+    static func message(for error: Error) -> String {
+        if let cocoa = error as? CocoaError {
+            switch cocoa.code {
+            case .fileWriteNoPermission, .fileReadNoPermission:
+                return permissionText
+            case .fileNoSuchFile, .fileReadNoSuchFile:
+                return "El archivo o la carpeta ya no existe. Puede haberse movido o eliminado."
+            case .fileWriteOutOfSpace:
+                return "No hay espacio suficiente en el almacenamiento."
+            case .fileWriteVolumeReadOnly:
+                return "Este almacenamiento es de solo lectura."
+            default:
+                break
+            }
+        }
+
+        if let posix = error as? POSIXError {
+            switch posix.code {
+            case .EPERM, .EACCES:
+                return permissionText
+            default:
+                break
+            }
+        }
+
+        return error.localizedDescription
+    }
+}

@@ -21,6 +21,69 @@ struct ExplorerStorageLocation: Identifiable, Equatable, Sendable {
     }
 }
 
+/// De dónde viene una ubicación autorizada (para mostrarla con su origen).
+enum ExplorerStorageSource: Sendable {
+    case app
+    case iCloud
+    case iPhone
+    case provider
+    case unknown
+
+    var title: String {
+        switch self {
+        case .app: return "Nikaido Explorer"
+        case .iCloud: return "iCloud Drive"
+        case .iPhone: return "En mi iPhone"
+        case .provider: return "Otro proveedor"
+        case .unknown: return "Carpeta autorizada"
+        }
+    }
+
+    var symbol: String {
+        switch self {
+        case .app: return "tray.full"
+        case .iCloud: return "icloud"
+        case .iPhone: return "iphone"
+        case .provider: return "externaldrive"
+        case .unknown: return "folder"
+        }
+    }
+}
+
+extension ExplorerStorageLocation {
+    var source: ExplorerStorageSource {
+        if kind == .local { return .app }
+
+        let path = rootURL.standardizedFileURL.path
+
+        if path.contains("/Mobile Documents/") || path.contains("com~apple~CloudDocs") {
+            return .iCloud
+        }
+
+        if path.contains("/File Provider Storage") {
+            return .iPhone
+        }
+
+        if path.contains("/LiveFiles/") || path.contains("/CloudStorage/") {
+            return .provider
+        }
+
+        let ubiquitous = (try? rootURL.resourceValues(
+            forKeys: [.isUbiquitousItemKey]
+        ))?.isUbiquitousItem == true
+
+        return ubiquitous ? .iCloud : .unknown
+    }
+}
+
+/// Referencia guardada que ya no se puede abrir (carpeta movida, eliminada
+/// o permiso revocado). Se muestra al usuario en lugar de desaparecer.
+struct ExplorerUnavailableLocation: Identifiable, Equatable, Sendable {
+    let id: UUID
+    let name: String
+    let reason: String
+}
+
 struct ExplorerFileItem: Identifiable, Hashable, Sendable {
     let url: URL
     let name: String

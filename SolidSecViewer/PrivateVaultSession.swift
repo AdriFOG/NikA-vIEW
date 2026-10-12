@@ -329,6 +329,33 @@ final class PrivateVaultSession: ObservableObject {
         }
     }
 
+    /// Comprueba la contraseña sin cerrar ni reabrir la bóveda. Se usa como
+    /// alternativa a Face ID antes de abrir un archivo protegido. Compara la
+    /// clave derivada con la que ya está en memoria en tiempo constante.
+    func verifyPassword(_ password: String) async -> Bool {
+        guard isUnlocked, !password.isEmpty else { return false }
+
+        let currentKey = key
+
+        let matches: Bool? = try? await Task.detached(priority: .userInitiated) { () -> Bool in
+            let loaded = try Self.loadAuthenticatedVault(password: password)
+            return Self.constantTimeEquals(loaded.config.derivedKey, currentKey)
+        }.value
+
+        return matches == true
+    }
+
+    nonisolated private static func constantTimeEquals(_ lhs: Data, _ rhs: Data) -> Bool {
+        guard lhs.count == rhs.count else { return false }
+
+        var difference: UInt8 = 0
+        for (left, right) in zip(lhs, rhs) {
+            difference |= left ^ right
+        }
+
+        return difference == 0
+    }
+
     func lock() {
         generation &+= 1
 

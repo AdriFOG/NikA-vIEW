@@ -21,7 +21,7 @@ final class ExplorerTrashManager: ObservableObject {
         let base = FileManager.default.urls(
             for: .applicationSupportDirectory,
             in: .userDomainMask
-        ).first!
+        ).first ?? FileManager.default.temporaryDirectory
         let directory = base.appendingPathComponent("NikaidoExplorer", isDirectory: true)
         try? FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
         metadataURL = directory.appendingPathComponent("trash-index.json")

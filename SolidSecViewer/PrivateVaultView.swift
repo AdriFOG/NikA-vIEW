@@ -68,6 +68,13 @@ struct PrivateVaultView: View {
     @State private var isBiometricBusy = false
     @State private var biometricAutoAttempted = false
     @State private var methodNotice: String?
+    @AppStorage("NikaidoVault.requireFileAuth.v1") private var requireFileAuth = true
+    @State private var pendingProtectedAction: (() -> Void)?
+    @State private var showFilePasswordPrompt = false
+    @State private var filePasswordText = ""
+    @State private var filePasswordError: String?
+    @State private var isVerifyingFilePassword = false
+    @State private var thumbnailsRevealed = false
 
     private var visibleChildren: [PrivateVaultEntry] {
         let children = vault.children(of: currentFolderID)
@@ -135,6 +142,15 @@ struct PrivateVaultView: View {
                 }
             }
         }
+        .onReceive(vault.$isUnlocked) { unlocked in
+            if !unlocked {
+                thumbnailsRevealed = false
+                pendingProtectedAction = nil
+                showFilePasswordPrompt = false
+                filePasswordText = ""
+                NikaidoFileAuth.reset()
+            }
+        }
         .onReceive(NotificationCenter.default.publisher(
             for: UIApplication.didEnterBackgroundNotification
         )) { _ in
@@ -148,6 +164,11 @@ struct PrivateVaultView: View {
             showNewFolder = false
             pendingMethodPassword = nil
             showUnlockMethodChoice = false
+            pendingProtectedAction = nil
+            showFilePasswordPrompt = false
+            filePasswordText = ""
+            thumbnailsRevealed = false
+            NikaidoFileAuth.reset()
             biometricAutoAttempted = false
 
             // If a plaintext export temp exists, release it before clearing the
@@ -200,6 +221,27 @@ struct PrivateVaultView: View {
             }
         } message: {
             Text(methodNotice ?? "")
+        }
+        .alert(
+            "Confirma tu identidad",
+            isPresented: $showFilePasswordPrompt
+        ) {
+            SecureField("Contraseña de Nikaido Vault", text: $filePasswordText)
+
+            Button("Abrir") {
+                submitFilePassword()
+            }
+
+            Button("Cancelar", role: .cancel) {
+                pendingProtectedAction = nil
+                filePasswordText = ""
+                filePasswordError = nil
+            }
+        } message: {
+            Text(
+                filePasswordError
+                ?? "Escribe la contraseña de Nikaido Vault para abrir este archivo."
+            )
         }
         .alert(
             "Guardado en Nikaido Explorer",
@@ -650,6 +692,41 @@ struct PrivateVaultView: View {
                         )
                     }
 
+                    Toggle(
+                        isOn: Binding(
+                            get: { requireFileAuth },
+                            set: { newValue in
+                                if newValue {
+                                    requireFileAuth = true
+                                } else {
+                                    protectedOpen("Desactivar la protección de archivos") {
+                                        requireFileAuth = false
+                                    }
+                                }
+                            }
+                        )
+                    ) {
+                        Label(
+                            "Pedir identidad al abrir archivos",
+                            systemImage: "lock.shield"
+                        )
+                    }
+
+                    if requireFileAuth {
+                        Button {
+                            toggleThumbnailReveal()
+                        } label: {
+                            Label(
+                                thumbnailsRevealed
+                                ? "Ocultar miniaturas"
+                                : "Mostrar miniaturas",
+                                systemImage: thumbnailsRevealed
+                                ? "eye.slash"
+                                : "eye"
+                            )
+                        }
+                    }
+
                     Button {
                         NikaidoUnlockPreference.disableBiometric()
                         unlockMethod = nil
@@ -707,21 +784,28 @@ struct PrivateVaultView: View {
     private func entryCard(_ entry: PrivateVaultEntry) -> some View {
         Button {
             if entry.isSecCollectionFolder {
-                selectedSecFolder = entry
+                protectedOpen("Abrir galería protegida") {
+                    selectedSecFolder = entry
+                }
             } else if entry.kind == .folder {
                 vaultSearch = ""
                 currentFolderID = entry.id
             } else if entry.isImage || entry.isVideo {
-                selectedEntry = entry
+                protectedOpen("Abrir \(entry.name)") {
+                    selectedEntry = entry
+                }
             } else if entry.fileExtension == "zip" {
-                selectedSecZip = entry
+                protectedOpen("Abrir \(entry.name)") {
+                    selectedSecZip = entry
+                }
             }
         } label: {
             VStack(spacing: 8) {
                 if entry.isImage || entry.isVideo {
                     PrivateVaultEntryThumbnail(
                         vault: vault,
-                        entry: entry
+                        entry: entry,
+                        revealed: thumbnailsRevealed || !requireFileAuth
                     )
                 } else {
                     ZStack {
@@ -761,7 +845,9 @@ struct PrivateVaultView: View {
         .contextMenu {
             if entry.isSecCollectionFolder {
                 Button {
-                    selectedSecFolder = entry
+                    protectedOpen("Abrir galería protegida") {
+                        selectedSecFolder = entry
+                    }
                 } label: {
                     Label(
                         "Abrir galería .sec",
@@ -772,7 +858,9 @@ struct PrivateVaultView: View {
 
             if entry.kind == .file && entry.fileExtension == "zip" {
                 Button {
-                    selectedSecZip = entry
+                    protectedOpen("Abrir \(entry.name)") {
+                        selectedSecZip = entry
+                    }
                 } label: {
                     Label("Abrir ZIP .sec", systemImage: "doc.zipper")
                 }
@@ -780,8 +868,10 @@ struct PrivateVaultView: View {
 
             if entry.kind == .file {
                 Button {
-                    Task {
-                        await prepareExport(entry)
+                    protectedOpen("Exportar \(entry.name)") {
+                        Task {
+                            await prepareExport(entry)
+                        }
                     }
                 } label: {
                     Label(
@@ -793,8 +883,10 @@ struct PrivateVaultView: View {
 
             if entry.kind == .file {
                 Button {
-                    Task {
-                        await saveToExplorer(entry)
+                    protectedOpen("Guardar \(entry.name) sin cifrar") {
+                        Task {
+                            await saveToExplorer(entry)
+                        }
                     }
                 } label: {
                     Label(
@@ -851,6 +943,74 @@ struct PrivateVaultView: View {
         }
 
         isPreparingExport = false
+    }
+
+    /// Ejecuta `action` solo después de verificar la identidad del usuario con
+    /// Face ID o, como alternativa, la contraseña de la bóveda. Cancelar o
+    /// fallar nunca ejecuta la acción.
+    private func protectedOpen(
+        _ reason: String,
+        _ action: @escaping () -> Void
+    ) {
+        guard requireFileAuth, !NikaidoFileAuth.isWithinGrace else {
+            action()
+            return
+        }
+
+        Task { @MainActor in
+            let result = await NikaidoFileAuth.authenticate(reason: reason)
+
+            switch result {
+            case .success:
+                NikaidoFileAuth.markAuthenticated()
+                action()
+            case .cancelled:
+                break
+            case .needsPassword:
+                pendingProtectedAction = action
+                filePasswordText = ""
+                filePasswordError = nil
+                showFilePasswordPrompt = true
+            }
+        }
+    }
+
+    private func submitFilePassword() {
+        let typed = filePasswordText
+
+        guard !typed.isEmpty, !isVerifyingFilePassword else { return }
+
+        isVerifyingFilePassword = true
+
+        Task { @MainActor in
+            let verified = await vault.verifyPassword(typed)
+
+            isVerifyingFilePassword = false
+            filePasswordText = ""
+
+            if verified {
+                NikaidoFileAuth.markAuthenticated()
+                filePasswordError = nil
+
+                let action = pendingProtectedAction
+                pendingProtectedAction = nil
+                action?()
+            } else {
+                filePasswordError = "Contraseña incorrecta. Inténtalo de nuevo."
+                showFilePasswordPrompt = true
+            }
+        }
+    }
+
+    private func toggleThumbnailReveal() {
+        if thumbnailsRevealed {
+            thumbnailsRevealed = false
+            return
+        }
+
+        protectedOpen("Mostrar miniaturas de Nikaido Vault") {
+            thumbnailsRevealed = true
+        }
     }
 
     /// Descifra una copia y la guarda en la carpeta local de Nikaido Explorer.
@@ -941,11 +1101,20 @@ struct PrivateVaultView: View {
 struct PrivateVaultEntryThumbnail: View {
     @ObservedObject var vault: PrivateVaultSession
     let entry: PrivateVaultEntry
+    let revealed: Bool
 
     @State private var image: UIImage?
     @State private var isLoading = false
 
-    var body: some View {
+    private var placeholderSymbol: String {
+        if !revealed { return "lock.fill" }
+        return entry.isVideo ? "film.fill" : "photo.fill"
+    }
+
+    /// Contenido dibujado encima de un contenedor de tamaño fijo. Así la
+    /// imagen (que se escala para llenar) nunca modifica el tamaño de la celda
+    /// ni invade a las vecinas, sea vertical, horizontal o cuadrada.
+    private var thumbnailContent: some View {
         ZStack {
             RoundedRectangle(cornerRadius: 12)
                 .fill(.quaternary)
@@ -954,9 +1123,10 @@ struct PrivateVaultEntryThumbnail: View {
                 Image(uiImage: image)
                     .resizable()
                     .scaledToFill()
+                    .frame(maxWidth: .infinity, maxHeight: .infinity)
                     .clipped()
             } else {
-                Image(systemName: entry.isVideo ? "film.fill" : "photo.fill")
+                Image(systemName: placeholderSymbol)
                     .font(.system(size: 36))
                     .foregroundStyle(.secondary)
             }
@@ -969,7 +1139,7 @@ struct PrivateVaultEntryThumbnail: View {
                     .clipShape(Circle())
             }
 
-            if entry.isVideo {
+            if entry.isVideo && revealed {
                 Image(systemName: "play.circle.fill")
                     .font(.system(size: image == nil ? 30 : 36))
                     .foregroundStyle(.white)
@@ -977,9 +1147,22 @@ struct PrivateVaultEntryThumbnail: View {
                     .opacity(isLoading && image == nil ? 0.45 : 0.95)
             }
         }
-        .aspectRatio(1.25, contentMode: .fit)
-        .clipShape(RoundedRectangle(cornerRadius: 12))
-        .task(id: entry.id) {
+    }
+
+    var body: some View {
+        Color.clear
+            .aspectRatio(1.25, contentMode: .fit)
+            .overlay {
+                thumbnailContent
+            }
+            .clipShape(RoundedRectangle(cornerRadius: 12))
+            .contentShape(RoundedRectangle(cornerRadius: 12))
+        .task(id: "\(entry.id.uuidString)-\(revealed)") {
+            guard revealed else {
+                image = nil
+                return
+            }
+
             isLoading = true
             defer { isLoading = false }
 

@@ -109,7 +109,7 @@ final class ExplorerOperationQueue: ObservableObject {
             } catch is CancellationError {
                 update(id) { $0.state = .cancelled }
             } catch {
-                update(id) { $0.state = .failed(error.localizedDescription) }
+                update(id) { $0.state = .failed(ExplorerErrorText.message(for: error)) }
             }
         }
     }
