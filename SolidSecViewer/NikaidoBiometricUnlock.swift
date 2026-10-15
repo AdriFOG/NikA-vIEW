@@ -1,5 +1,5 @@
 import Foundation
-import LocalAuthentication
+@preconcurrency import LocalAuthentication
 import Security
 
 /// Cómo quiere el usuario desbloquear Nikaido Vault.
