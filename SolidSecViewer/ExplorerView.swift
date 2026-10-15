@@ -60,10 +60,12 @@ private enum ExplorerPendingAction {
 
 struct ExplorerView: View {
     @Environment(\.nikaidoAccent) private var nikaidoAccent
+    @ObservedObject var locations: SecurityScopedFolderStore
+    let launchRequest: ExplorerLaunchRequest?
+    let onOpenHome: () -> Void
     let onOpenVault: () -> Void
     let onOpenSecReader: () -> Void
 
-    @StateObject private var locations = SecurityScopedFolderStore()
     @StateObject private var favorites = ExplorerFavoritesStore()
     @StateObject private var leftPane = ExplorerPaneState()
     @StateObject private var rightPane = ExplorerPaneState()
@@ -102,7 +104,10 @@ struct ExplorerView: View {
     @State private var showFileImporter = false
     @State private var editorTarget: ExplorerEditorTarget?
     @State private var showGlobalFiles = false
+    @State private var globalInitialFilter: ExplorerGlobalFilter = .all
+    @State private var handledLaunchID: UUID?
     @StateObject private var globalIndex = ExplorerGlobalIndex()
+    @StateObject private var dragState = ExplorerDragState()
     @State private var infoTarget: ExplorerFileItem?
     @State private var vaultSendItems: [ExplorerFileItem] = []
     @State private var vaultSendPane = 0
@@ -183,6 +188,12 @@ struct ExplorerView: View {
             .background(Color(uiColor: .systemBackground))
             .overlay(alignment: .bottomTrailing) {
                 floatingAddButton
+            }
+            .overlay {
+                ExplorerDragGhostLayer(
+                    dragState: dragState,
+                    pointer: dragState.pointer
+                )
             }
         }
     }
@@ -318,7 +329,8 @@ struct ExplorerView: View {
         .sheet(isPresented: $showGlobalFiles) {
             ExplorerGlobalFilesView(
                 index: globalIndex,
-                locations: locations.locations
+                locations: locations.locations,
+                initialFilter: globalInitialFilter
             ) { result in
                 revealGlobalResult(result)
             }
@@ -509,11 +521,54 @@ struct ExplorerView: View {
             {
                 rightPane.openLocation(local)
             }
+
+            handleLaunchRequest()
+        }
+    }
+
+    /// Atiende lo que se pidió desde el inicio (abrir una carpeta, un tipo de
+    /// archivo o los ajustes). Se atiende una sola vez por petición.
+    private func handleLaunchRequest() {
+        guard let request = launchRequest, handledLaunchID != request.id else {
+            return
+        }
+
+        handledLaunchID = request.id
+
+        switch request.kind {
+        case .files:
+            if let local = locations.localLocation {
+                activePane = 0
+                leftPane.openLocation(local)
+            }
+        case .location(let id):
+            if let location = locations.locations.first(where: { $0.id == id }) {
+                activePane = 0
+                leftPane.openLocation(location)
+            }
+        case .folder(let id, let url):
+            if let location = locations.locations.first(where: { $0.id == id }) {
+                activePane = 0
+                leftPane.openLocation(location, folderURL: url)
+            }
+        case .global(let filter):
+            globalInitialFilter = filter
+            showGlobalFiles = true
+        case .settings:
+            showSettings = true
         }
     }
 
     private var explorerTopBar: some View {
         HStack(spacing: 2) {
+            Button {
+                onOpenHome()
+            } label: {
+                Image(systemName: "house")
+            }
+            .buttonStyle(NikaidoIconButtonStyle())
+            .accessibilityLabel("Inicio")
+
             Button {
                 showStorageLocations = true
             } label: {
@@ -584,6 +639,7 @@ struct ExplorerView: View {
 
             Menu {
                 Button {
+                    globalInitialFilter = .all
                     showGlobalFiles = true
                 } label: {
                     Label(
@@ -1083,6 +1139,25 @@ struct ExplorerView: View {
             },
             onDropProviders: { providers in
                 handleDrop(providers, destinationPane: index)
+            },
+            onDropIntoFolder: { providers, folder in
+                handleDrop(providers, destinationPane: index, folder: folder)
+            },
+            onCustomDrop: { request in
+                performDrop(request)
+            },
+            dragState: dragState,
+            externalLocations: locations.locations.filter { $0.kind == .authorized },
+            onOpenLocation: { location in
+                activePane = index
+                pane(at: index).openLocation(location)
+            },
+            onGoHome: {
+                activePane = index
+
+                if let local = locations.localLocation {
+                    pane(at: index).openLocation(local)
+                }
             }
         )
     }
@@ -1409,24 +1484,174 @@ struct ExplorerView: View {
         sourcePane.selectionMode = false
     }
 
-    private func handleDrop(_ providers: [NSItemProvider], destinationPane: Int) -> Bool {
+    /// Arrastre del sistema (por si llega desde otra fuente): mueve a la
+    /// carpeta indicada o a la carpeta actual del panel donde se soltó.
+    private func handleDrop(
+        _ providers: [NSItemProvider],
+        destinationPane: Int,
+        folder: ExplorerFileItem? = nil
+    ) -> Bool {
         Task {
             do {
                 let payload = try await ExplorerDragPayload.load(from: providers)
-                guard payload.sourcePane != destinationPane else { return }
                 let sourcePane = pane(at: payload.sourcePane)
                 let urlSet = Set(payload.urls)
-                let dragged = sourcePane.items.filter { urlSet.contains($0.url.absoluteString) }
+                let dragged = sourcePane.items.filter {
+                    urlSet.contains($0.url.absoluteString)
+                }
+
                 guard !dragged.isEmpty else {
                     globalError = "Los archivos arrastrados ya no están en el panel de origen."
                     return
                 }
-                transfer(dragged, fromPane: payload.sourcePane, moving: true)
+
+                if let folder {
+                    moveItems(
+                        dragged,
+                        fromPane: payload.sourcePane,
+                        intoFolder: folder.url,
+                        destinationPane: destinationPane
+                    )
+                } else {
+                    guard
+                        payload.sourcePane != destinationPane,
+                        let destination = pane(at: destinationPane).currentURL
+                    else {
+                        return
+                    }
+
+                    moveItems(
+                        dragged,
+                        fromPane: payload.sourcePane,
+                        intoFolder: destination,
+                        destinationPane: destinationPane
+                    )
+                }
             } catch {
                 globalError = ExplorerErrorText.message(for: error)
             }
         }
+
         return true
+    }
+
+    /// Soltar con el asa de arrastre: sobre una carpeta o sobre el otro panel.
+    private func performDrop(_ request: ExplorerDropRequest) {
+        switch request.target {
+        case .folder(let folder, let paneIndex):
+            moveItems(
+                request.items,
+                fromPane: request.sourcePane,
+                intoFolder: folder.url,
+                destinationPane: paneIndex
+            )
+        case .pane(let paneIndex):
+            guard
+                paneIndex != request.sourcePane,
+                let destination = pane(at: paneIndex).currentURL
+            else {
+                return
+            }
+
+            moveItems(
+                request.items,
+                fromPane: request.sourcePane,
+                intoFolder: destination,
+                destinationPane: paneIndex
+            )
+        case .location(let location):
+            moveItems(
+                request.items,
+                fromPane: request.sourcePane,
+                intoFolder: location.rootURL,
+                destinationRoot: location.rootURL
+            )
+        }
+    }
+
+    /// Mueve elementos a una carpeta concreta (de cualquiera de los paneles).
+    private func moveItems(
+        _ items: [ExplorerFileItem],
+        fromPane sourceIndex: Int,
+        intoFolder destinationDirectory: URL,
+        destinationPane destinationIndex: Int
+    ) {
+        guard let destinationRoot = pane(at: destinationIndex).location?.rootURL else {
+            globalError = "Abre una ubicación en ambos paneles primero."
+            return
+        }
+
+        moveItems(
+            items,
+            fromPane: sourceIndex,
+            intoFolder: destinationDirectory,
+            destinationRoot: destinationRoot
+        )
+    }
+
+    /// Mueve a una carpeta de cualquier ubicación (raíz de destino explícita).
+    private func moveItems(
+        _ items: [ExplorerFileItem],
+        fromPane sourceIndex: Int,
+        intoFolder destinationDirectory: URL,
+        destinationRoot: URL
+    ) {
+        let sourcePane = pane(at: sourceIndex)
+
+        guard let sourceRoot = sourcePane.location?.rootURL else {
+            globalError = "Abre una ubicación en el panel de origen primero."
+            return
+        }
+
+        let destinationPath = destinationDirectory.standardizedFileURL.path
+
+        // No tiene sentido mover algo adonde ya está, ni una carpeta dentro de
+        // sí misma o de sus subcarpetas.
+        let movable = items.filter { item in
+            let itemPath = item.url.standardizedFileURL.path
+            let parentPath = item.url.deletingLastPathComponent().standardizedFileURL.path
+
+            if parentPath == destinationPath {
+                return false
+            }
+
+            if item.isDirectory,
+               destinationPath == itemPath || destinationPath.hasPrefix(itemPath + "/")
+            {
+                return false
+            }
+
+            return true
+        }
+
+        guard !movable.isEmpty else {
+            globalError = "Ese elemento ya está en esa carpeta, o no se puede mover dentro de sí mismo."
+            return
+        }
+
+        let folderName = destinationDirectory.lastPathComponent
+        let title = movable.count == 1
+            ? "Mover \(movable[0].name) a \(folderName)"
+            : "Mover \(movable.count) elementos a \(folderName)"
+
+        operationQueue.enqueue(
+            title: title,
+            kind: .move,
+            totalUnits: movable.count
+        ) {
+            try await ExplorerFileEngine.move(
+                movable,
+                sourceRoot: sourceRoot,
+                to: destinationDirectory,
+                destinationRoot: destinationRoot,
+                conflictPolicy: conflictPolicy
+            )
+            await leftPane.refresh()
+            await rightPane.refresh()
+        }
+
+        sourcePane.clearSelection()
+        sourcePane.selectionMode = false
     }
 
     private func compress(
@@ -1537,6 +1762,14 @@ struct ExplorerPaneView: View {
     let onInfo: (ExplorerFileItem) -> Void
     let onEdit: (ExplorerFileItem) -> Void
     let onDropProviders: ([NSItemProvider]) -> Bool
+    let onDropIntoFolder: ([NSItemProvider], ExplorerFileItem) -> Bool
+    let onCustomDrop: (ExplorerDropRequest) -> Void
+    @ObservedObject var dragState: ExplorerDragState
+    let externalLocations: [ExplorerStorageLocation]
+    let onOpenLocation: (ExplorerStorageLocation) -> Void
+    let onGoHome: () -> Void
+
+    @State private var targetedFolderID: String?
 
     @ObservedObject private var folderColors = NikaidoFolderColors.shared
     @Environment(\.nikaidoFolderColor) private var defaultFolderColor
@@ -1583,10 +1816,11 @@ struct ExplorerPaneView: View {
             Rectangle()
                 .stroke(
                     nikaidoAccent,
-                    lineWidth: isDropTargeted ? 3 : 0
+                    lineWidth: (isDropTargeted || dragState.highlightedPane == paneIndex) ? 3 : 0
                 )
                 .allowsHitTesting(false)
         )
+        .explorerPaneProbe(dragState, pane: paneIndex)
         .overlay(alignment: .top) {
             Rectangle()
                 .fill(nikaidoAccent)
@@ -1599,6 +1833,17 @@ struct ExplorerPaneView: View {
     private var paneHeader: some View {
         VStack(spacing: 8) {
             HStack(spacing: 8) {
+                if pane.location?.kind == .authorized {
+                    Button {
+                        onActivate()
+                        onGoHome()
+                    } label: {
+                        Image(systemName: "house")
+                    }
+                    .buttonStyle(NikaidoIconButtonStyle())
+                    .accessibilityLabel("Inicio")
+                }
+
                 if pane.canGoBack {
                     Button {
                         onActivate()
@@ -1712,7 +1957,24 @@ struct ExplorerPaneView: View {
                     .foregroundStyle(.red)
             }
 
-            if pane.items.isEmpty && pane.errorMessage == nil {
+            if showsExternalLocations {
+                Section("Carpetas añadidas") {
+                    ForEach(externalLocations) { location in
+                        ExplorerExternalLocationRow(
+                            location: location,
+                            isDropTarget: isExternalDropTarget(location)
+                        )
+                        .contentShape(Rectangle())
+                        .onTapGesture {
+                            onActivate()
+                            onOpenLocation(location)
+                        }
+                        .explorerExternalProbe(dragState, location: location)
+                    }
+                }
+            }
+
+            if pane.items.isEmpty && pane.errorMessage == nil && !showsExternalLocations {
                 emptyFolderRow
             }
 
@@ -1723,7 +1985,8 @@ struct ExplorerPaneView: View {
                     selected: pane.selectedIDs.contains(item.id),
                     selectionMode: pane.selectionMode,
                     showMediaThumbnails: showMediaThumbnails,
-                    dragProvider: { dragProvider(for: item) }
+                    isDropTarget: isFolderDropTarget(item),
+                    dragCallbacks: dragCallbacks(for: item)
                 )
                 .contentShape(Rectangle())
                 .onTapGesture {
@@ -1732,7 +1995,14 @@ struct ExplorerPaneView: View {
                 .contextMenu {
                     itemContextMenu(item)
                 }
-                .onDrag { dragProvider(for: item) }
+                .explorerFolderProbe(dragState, pane: paneIndex, item: item)
+                .onDrop(
+                    of: item.isDirectory ? [UTType.plainText.identifier] : [],
+                    isTargeted: folderTargetBinding(for: item)
+                ) { providers in
+                    guard item.isDirectory else { return false }
+                    return onDropIntoFolder(providers, item)
+                }
                 .swipeActions(edge: .trailing, allowsFullSwipe: false) {
                     Button(role: .destructive) {
                         onDelete(item)
@@ -1770,6 +2040,7 @@ struct ExplorerPaneView: View {
             onDropProviders(providers)
         }
         .listStyle(.plain)
+        .scrollDisabled(dragState.isDragging)
         .refreshable {
             await pane.refresh()
         }
@@ -1785,7 +2056,34 @@ struct ExplorerPaneView: View {
                     .padding(.horizontal)
             }
 
-            if pane.items.isEmpty && pane.errorMessage == nil {
+            if showsExternalLocations {
+                LazyVGrid(
+                    columns: [
+                        GridItem(
+                            .adaptive(minimum: 100, maximum: 145),
+                            spacing: 10
+                        )
+                    ],
+                    spacing: 10
+                ) {
+                    ForEach(externalLocations) { location in
+                        ExplorerExternalLocationCell(
+                            location: location,
+                            isDropTarget: isExternalDropTarget(location)
+                        )
+                        .contentShape(Rectangle())
+                        .onTapGesture {
+                            onActivate()
+                            onOpenLocation(location)
+                        }
+                        .explorerExternalProbe(dragState, location: location)
+                    }
+                }
+                .padding(.horizontal, 10)
+                .padding(.top, 8)
+            }
+
+            if pane.items.isEmpty && pane.errorMessage == nil && !showsExternalLocations {
                 NikaidoEmptyState(
                     systemName: "tray",
                     title: "Esta carpeta está vacía",
@@ -1807,7 +2105,9 @@ struct ExplorerPaneView: View {
                             tint: tint(for: item),
                             selected: pane.selectedIDs.contains(item.id),
                             selectionMode: pane.selectionMode,
-                            showMediaThumbnails: showMediaThumbnails
+                            showMediaThumbnails: showMediaThumbnails,
+                            isDropTarget: isFolderDropTarget(item),
+                            dragCallbacks: dragCallbacks(for: item)
                         )
                         .contentShape(Rectangle())
                         .onTapGesture {
@@ -1816,7 +2116,14 @@ struct ExplorerPaneView: View {
                         .contextMenu {
                             itemContextMenu(item)
                         }
-                        .onDrag { dragProvider(for: item) }
+                        .explorerFolderProbe(dragState, pane: paneIndex, item: item)
+                        .onDrop(
+                            of: item.isDirectory ? [UTType.plainText.identifier] : [],
+                            isTargeted: folderTargetBinding(for: item)
+                        ) { providers in
+                            guard item.isDirectory else { return false }
+                            return onDropIntoFolder(providers, item)
+                        }
                     }
                 }
                 .padding(10)
@@ -1825,6 +2132,7 @@ struct ExplorerPaneView: View {
         .onDrop(of: [UTType.plainText.identifier], isTargeted: $isDropTargeted) { providers in
             onDropProviders(providers)
         }
+        .scrollDisabled(dragState.isDragging)
         .refreshable {
             await pane.refresh()
         }
@@ -1841,6 +2149,80 @@ struct ExplorerPaneView: View {
             urls: items.map { $0.url.absoluteString },
             sourcePane: paneIndex
         ).itemProvider()
+    }
+
+    /// En la raíz del almacenamiento de Nikaido se muestran también las
+    /// carpetas añadidas (iCloud / iPhone), cada una con su distintivo.
+    private var showsExternalLocations: Bool {
+        guard
+            !externalLocations.isEmpty,
+            pane.search.isEmpty,
+            let location = pane.location,
+            location.kind == .local,
+            let current = pane.currentURL
+        else {
+            return false
+        }
+
+        return current.standardizedFileURL.path
+            == location.rootURL.standardizedFileURL.path
+    }
+
+    private func isExternalDropTarget(_ location: ExplorerStorageLocation) -> Bool {
+        dragState.highlightedFolderKey == ExplorerDragState.externalKey(location.id)
+    }
+
+    private func dragItems(for item: ExplorerFileItem) -> [ExplorerFileItem] {
+        if pane.selectedIDs.contains(item.id), !pane.selectedItems.isEmpty {
+            return pane.selectedItems
+        }
+
+        return [item]
+    }
+
+    private func dragCallbacks(for item: ExplorerFileItem) -> ExplorerDragCallbacks {
+        ExplorerDragCallbacks(
+            began: { point in
+                onActivate()
+                NikaidoTheme.haptic(.medium)
+                dragState.begin(
+                    items: dragItems(for: item),
+                    sourcePane: paneIndex,
+                    at: point
+                )
+            },
+            moved: { point in
+                dragState.move(to: point)
+            },
+            ended: { point, completed in
+                if completed, let request = dragState.finish(at: point) {
+                    onCustomDrop(request)
+                } else {
+                    dragState.cancel()
+                }
+            }
+        )
+    }
+
+    private func isFolderDropTarget(_ item: ExplorerFileItem) -> Bool {
+        guard item.isDirectory else { return false }
+
+        return dragState.highlightedFolderKey
+            == ExplorerDragState.folderKey(pane: paneIndex, id: item.id)
+            || targetedFolderID == item.id
+    }
+
+    private func folderTargetBinding(for item: ExplorerFileItem) -> Binding<Bool> {
+        Binding(
+            get: { targetedFolderID == item.id },
+            set: { isTargeted in
+                if isTargeted {
+                    targetedFolderID = item.id
+                } else if targetedFolderID == item.id {
+                    targetedFolderID = nil
+                }
+            }
+        )
     }
 
     private var emptyFolderRow: some View {
@@ -2103,7 +2485,8 @@ private struct ExplorerFileRow: View {
     let selected: Bool
     let selectionMode: Bool
     let showMediaThumbnails: Bool
-    let dragProvider: () -> NSItemProvider
+    let isDropTarget: Bool
+    let dragCallbacks: ExplorerDragCallbacks
 
     var body: some View {
         HStack(spacing: 12) {
@@ -2169,24 +2552,23 @@ private struct ExplorerFileRow: View {
                     .foregroundStyle(.tertiary)
             }
 
-            // Asa para arrastrar al otro panel: no choca con el menú de
-            // mantener presionado ni con el toque de la fila.
-            Image(systemName: "line.3.horizontal")
-                .font(.system(size: 15, weight: .semibold))
-                .foregroundStyle(.tertiary)
-                .frame(width: 30, height: 36)
-                .contentShape(Rectangle())
-                .onDrag { dragProvider() }
-                .accessibilityLabel("Arrastrar al otro panel")
+            // Asa para arrastrar a una carpeta o al otro panel: no choca con el
+            // menú de mantener presionado ni con el toque de la fila.
+            ExplorerDragHandle(callbacks: dragCallbacks)
         }
         .padding(.vertical, 4)
         .background(
             RoundedRectangle(cornerRadius: 12, style: .continuous)
                 .fill(
-                    selected
-                    ? nikaidoAccent.opacity(0.10)
-                    : Color.clear
+                    isDropTarget
+                    ? nikaidoAccent.opacity(0.22)
+                    : (selected ? nikaidoAccent.opacity(0.10) : Color.clear)
                 )
+                .padding(.horizontal, -6)
+        )
+        .overlay(
+            RoundedRectangle(cornerRadius: 12, style: .continuous)
+                .stroke(nikaidoAccent, lineWidth: isDropTarget ? 2 : 0)
                 .padding(.horizontal, -6)
         )
         .animation(.easeInOut(duration: 0.15), value: selected)
@@ -2202,6 +2584,8 @@ private struct ExplorerFileGridCell: View {
     let selected: Bool
     let selectionMode: Bool
     let showMediaThumbnails: Bool
+    let isDropTarget: Bool
+    let dragCallbacks: ExplorerDragCallbacks
 
     var body: some View {
         VStack(spacing: 8) {
@@ -2238,6 +2622,11 @@ private struct ExplorerFileGridCell: View {
                     .padding(6)
                 }
             }
+            .overlay(alignment: .topLeading) {
+                ExplorerDragHandle(callbacks: dragCallbacks)
+                    .background(.thinMaterial, in: Circle())
+                    .padding(4)
+            }
 
             Text(item.name)
                 .font(.caption.weight(.medium))
@@ -2255,7 +2644,7 @@ private struct ExplorerFileGridCell: View {
         .background(
             RoundedRectangle(cornerRadius: 18, style: .continuous)
                 .stroke(
-                    selected ? nikaidoAccent : Color.clear,
+                    (selected || isDropTarget) ? nikaidoAccent : Color.clear,
                     lineWidth: 2
                 )
         )

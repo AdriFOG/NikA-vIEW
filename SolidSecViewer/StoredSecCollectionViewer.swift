@@ -416,6 +416,12 @@ final class StoredSecCollectionSession: ObservableObject {
             throw PrivateVaultError.locked
         }
 
+        // Un solo video a la vez: al abrir otro se detienen los anteriores.
+        for previous in activeVideoPlaybacks.values {
+            previous.invalidate()
+        }
+        activeVideoPlaybacks.removeAll(keepingCapacity: true)
+
         let playback = try StoredSecVideoPlayback(
             descriptor: descriptor,
             secKey: key,
@@ -745,7 +751,9 @@ struct StoredSecCollectionThumbnail: View {
     @State private var image: UIImage?
     @State private var isLoading = false
 
-    var body: some View {
+    /// Contenido dibujado sobre un contenedor de tamaño fijo para que la imagen
+    /// escalada nunca desborde su celda ni se encime con las vecinas.
+    private var thumbnailContent: some View {
         ZStack {
             RoundedRectangle(cornerRadius: 10)
                 .fill(.quaternary)
@@ -754,6 +762,7 @@ struct StoredSecCollectionThumbnail: View {
                 Image(uiImage: image)
                     .resizable()
                     .scaledToFill()
+                    .frame(maxWidth: .infinity, maxHeight: .infinity)
                     .clipped()
             } else {
                 Image(
@@ -783,7 +792,14 @@ struct StoredSecCollectionThumbnail: View {
                     .opacity(isLoading && image == nil ? 0.45 : 0.95)
             }
         }
+    }
+
+    var body: some View {
+        Color.clear
         .aspectRatio(1.15, contentMode: .fit)
+        .overlay {
+            thumbnailContent
+        }
         .clipShape(RoundedRectangle(cornerRadius: 10))
         .task(id: item.id) {
             guard item.isImage || item.isVideo else { return }
@@ -805,6 +821,7 @@ struct StoredSecCollectionMediaViewer: View {
     @State private var playback: StoredSecVideoPlayback?
     @State private var errorText: String?
     @State private var isPreparingVideo = false
+    @State private var viewerIsActive = true
 
     var body: some View {
         ZStack(alignment: .topTrailing) {
@@ -854,6 +871,7 @@ struct StoredSecCollectionMediaViewer: View {
             }
 
             Button {
+                viewerIsActive = false
                 session.stopVideoPlayback(playback)
                 playback = nil
                 dismiss()
@@ -866,6 +884,10 @@ struct StoredSecCollectionMediaViewer: View {
             .padding()
         }
         .task(id: item.id) {
+            viewerIsActive = true
+            session.stopVideoPlayback(playback)
+            playback = nil
+
             do {
                 if item.isImage {
                     let data = try await session.decrypt(item)
@@ -887,6 +909,14 @@ struct StoredSecCollectionMediaViewer: View {
                         for: item
                     )
 
+                    // Si el visor se cerró (o se cambió de video) mientras se
+                    // preparaba, no se reproduce: se libera de inmediato para
+                    // que ningún audio se quede sonando en segundo plano.
+                    guard viewerIsActive, !Task.isCancelled else {
+                        session.stopVideoPlayback(prepared)
+                        return
+                    }
+
                     playback = prepared
                     prepared.play()
                     return
@@ -898,6 +928,7 @@ struct StoredSecCollectionMediaViewer: View {
             }
         }
         .onDisappear {
+            viewerIsActive = false
             session.stopVideoPlayback(playback)
             playback = nil
         }

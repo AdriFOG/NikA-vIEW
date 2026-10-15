@@ -39,7 +39,10 @@ struct VaultThumbnail: View {
 
     @State private var image: UIImage?
 
-    var body: some View {
+    /// Se dibuja encima de un contenedor de tamaño fijo: la imagen (que se
+    /// escala para llenar) nunca cambia el tamaño de la celda ni invade a las
+    /// vecinas, sea el video vertical, horizontal o cuadrado.
+    private var thumbnailContent: some View {
         ZStack {
             Rectangle()
                 .fill(.quaternary)
@@ -48,6 +51,7 @@ struct VaultThumbnail: View {
                 Image(uiImage: image)
                     .resizable()
                     .scaledToFill()
+                    .frame(maxWidth: .infinity, maxHeight: .infinity)
                     .clipped()
             } else {
                 Image(systemName: item.isVideo ? "film.fill" : "photo")
@@ -62,7 +66,14 @@ struct VaultThumbnail: View {
                     .shadow(radius: 3)
             }
         }
+    }
+
+    var body: some View {
+        Color.clear
         .aspectRatio(1, contentMode: .fit)
+        .overlay {
+            thumbnailContent
+        }
         .clipShape(RoundedRectangle(cornerRadius: 8))
         .overlay(alignment: .bottomLeading) {
             Text(item.name)

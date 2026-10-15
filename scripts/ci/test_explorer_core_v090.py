@@ -55,8 +55,10 @@ if "<key>UIFileSharingEnabled</key>" not in info:
 if "<key>LSSupportsOpeningDocumentsInPlace</key>" not in info:
     fail("open-in-place no está activado")
 
-if "@State private var mode: AppMode = .explorer" not in content:
-    fail("Explorer no es la pantalla principal")
+# v0.11: la pantalla principal es el menú de inicio (HomeView), que abre el
+# Explorador; el Explorador sigue siendo un modo de primer nivel.
+if "@State private var mode: AppMode = .home" not in content or "case .explorer:" not in content:
+    fail("El inicio no es la pantalla principal o falta el Explorador")
 
 for required in (
     "Dispositivos de almacenamiento",

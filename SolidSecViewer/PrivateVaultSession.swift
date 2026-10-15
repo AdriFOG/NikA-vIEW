@@ -901,6 +901,13 @@ final class PrivateVaultSession: ObservableObject {
             throw PrivateVaultError.locked
         }
 
+        // Un solo video a la vez: al abrir otro se detienen los anteriores
+        // para que ningún audio se quede sonando en segundo plano.
+        for previous in activeVideoPlaybacks.values {
+            previous.invalidate()
+        }
+        activeVideoPlaybacks.removeAll(keepingCapacity: true)
+
         let playback = try PrivateVaultVideoPlayback(
             descriptor: descriptor,
             filename: entry.name

@@ -2,6 +2,7 @@ import SwiftUI
 import UIKit
 
 private enum AppMode {
+    case home
     case explorer
     case privateVault
     case secReader
@@ -10,8 +11,10 @@ private enum AppMode {
 struct ContentView: View {
     @EnvironmentObject private var vault: VaultSession
     @StateObject private var privateVault = PrivateVaultSession()
+    @StateObject private var locations = SecurityScopedFolderStore()
 
-    @State private var mode: AppMode = .explorer
+    @State private var mode: AppMode = .home
+    @State private var launchRequest: ExplorerLaunchRequest?
     @State private var showFolderPicker = false
     @State private var showZipPicker = false
     @State private var password = ""
@@ -37,12 +40,32 @@ struct ContentView: View {
         NavigationStack {
             Group {
                 switch mode {
+                case .home:
+                    HomeView(
+                        locations: locations,
+                        onOpenExplorer: { kind in
+                            launchRequest = ExplorerLaunchRequest(kind: kind)
+                            mode = .explorer
+                        },
+                        onOpenVault: {
+                            mode = .privateVault
+                        }
+                    )
+
                 case .explorer:
                     ExplorerView(
+                        locations: locations,
+                        launchRequest: launchRequest,
+                        onOpenHome: {
+                            launchRequest = nil
+                            mode = .home
+                        },
                         onOpenVault: {
+                            launchRequest = nil
                             mode = .privateVault
                         },
                         onOpenSecReader: {
+                            launchRequest = nil
                             mode = .secReader
                         }
                     )
@@ -51,7 +74,7 @@ struct ContentView: View {
                 case .privateVault:
                     PrivateVaultView {
                         privateVault.lock()
-                        mode = .explorer
+                        mode = .home
                     }
                     .environmentObject(privateVault)
 

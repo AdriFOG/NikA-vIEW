@@ -34,6 +34,33 @@ Cambios hechos por inspección del código. **No se compiló con Xcode en este e
 - Se quitó un `first!` en la papelera (ahora tiene alternativa).
 - Mensajes de error del Explorador unificados.
 
+## Arrastrar y soltar (carpetas y entre paneles)
+- Causa de que no funcionara: el arrastre del sistema (`onDrag`/`onDrop`) depende de la sesión de UIKit y no es fiable en este entorno (LiveContainer). Se reemplazó por un gesto propio.
+- Cómo se usa: mantén presionada el asa (≡) de un archivo o carpeta ~0.25 s, arrastra y suelta sobre una carpeta (se resalta) para moverlo ahí, o sobre el otro panel para moverlo a su carpeta actual. Aparece una "sombra" con el nombre que sigue al dedo.
+- Si el archivo está seleccionado junto con otros, se mueven todos los seleccionados.
+- No permite mover algo adonde ya está, ni una carpeta dentro de sí misma o de sus subcarpetas.
+- Límite: no hay auto-scroll al arrastrar cerca de los bordes.
+- La posición de carpetas y paneles se lee en vivo al soltar, así que funciona aunque la lista se haya desplazado.
+
+## v0.10.6 — miniaturas .sec, Face ID con contraseña guardada, audio
+- Miniaturas encimadas: faltaban las de los visores de colecciones `.sec` y ZIP (`VaultThumbnail`, `StoredSecCollectionThumbnail`). Mismo arreglo (contenedor fijo + imagen recortada encima).
+- Face ID: Face ID libera la contraseña guardada en el Llavero (cifrada por iOS, protegida por Face ID, solo en este iPhone) y se comprueba contra la clave real de la bóveda; no hay que escribir la contraseña. Si Face ID falla o eliges "Usar contraseña", se pide la contraseña. Después de escribirla se ofrece guardarla para usar Face ID. Si el Llavero no deja guardarla, el aviso muestra el código de error.
+- Audio: si cerrabas el visor mientras el video se preparaba, el reproductor se creaba igual y seguía sonando. Ahora se descarta si el visor ya no está, y solo hay un video activo a la vez.
+
+## v0.10.7 — carpetas añadidas en el inicio
+- En el inicio (raíz del almacenamiento de Nikaido) aparece la sección "Carpetas añadidas" con las carpetas de iCloud y del iPhone, en lista y en cuadrícula. Cada una lleva un distintivo: nube si es de iCloud, manzana si es del iPhone (otro proveedor: disco). Tocar una la abre en ese panel.
+- Desde una carpeta añadida, el botón de casa (Inicio) del panel regresa al inicio.
+- Se puede arrastrar (con el asa) un archivo o carpeta sobre una carpeta añadida y se mueve a su raíz; también sobre cualquier carpeta normal.
+- Los íconos del selector de almacenamiento usan los mismos distintivos.
+
+## v0.11.0 — menú principal (diseñado en el prototipo)
+- Nueva pantalla de inicio: logo con la N (toca para abrir Ajustes y salta dos veces al abrir la app), degradado con el color principal, tarjetas de iCloud y Almacenamiento local, NikaView Files, barra de Nikaido Vault con partículas y la cuadrícula "Por tipo" con íconos redondos.
+- iCloud y Almacenamiento local abren un recorrido de 3 pasos para añadir carpetas (usa el selector de carpetas existente y muestra las carpetas añadidas con su nube o manzana).
+- Botón "Todas" (carita): todas las carpetas juntas con filtros iCloud / iPhone / NikaView.
+- Música, Imágenes, Videos, Texto, IPA y dylibs, y Documentos abren el filtro global ya en ese tipo.
+- En el Explorador hay un botón de casa para volver al inicio. Salir de la bóveda regresa al inicio.
+- Las animaciones respetan "Reducir movimiento".
+
 ## Pendiente / a probar en un iPhone
 1. Face ID y la contraseña alternativa al abrir un archivo de la bóveda (incluido cancelar).
 2. Añadir una carpeta de "En mi iPhone" y una de iCloud; reiniciar la app y comprobar que siguen.

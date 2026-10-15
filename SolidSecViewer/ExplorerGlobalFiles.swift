@@ -12,6 +12,19 @@ enum ExplorerFileKinds {
         "mp4", "mov", "m4v", "mkv", "avi", "webm", "3gp"
     ]
 
+    static let music: Set<String> = [
+        "mp3", "m4a", "aac", "wav", "flac", "ogg", "aiff", "aif", "caf", "opus"
+    ]
+
+    static let packages: Set<String> = [
+        "ipa", "tipa", "dylib", "deb", "framework"
+    ]
+
+    static let documents: Set<String> = [
+        "pdf", "doc", "docx", "xls", "xlsx", "ppt", "pptx", "pages",
+        "numbers", "key", "epub", "odt", "ods", "odp"
+    ]
+
     static let text: Set<String> = [
         "txt", "md", "markdown", "rtf", "json", "xml", "yaml", "yml", "log",
         "csv", "ini", "conf", "cfg", "toml", "swift", "py", "js", "ts",
@@ -22,24 +35,33 @@ enum ExplorerFileKinds {
 
 enum ExplorerGlobalFilter: String, CaseIterable, Identifiable {
     case all
+    case music
     case images
     case videos
     case text
+    case packages
+    case documents
 
     var id: String { rawValue }
 
     var title: String {
         switch self {
         case .all: return "Todos"
-        case .images: return "Fotos"
+        case .music: return "Música"
+        case .images: return "Imágenes"
         case .videos: return "Videos"
         case .text: return "Texto"
+        case .packages: return "IPA y dylibs"
+        case .documents: return "Documentos"
         }
     }
 
     func matches(_ pathExtension: String) -> Bool {
         switch self {
         case .all: return true
+        case .music: return ExplorerFileKinds.music.contains(pathExtension)
+        case .packages: return ExplorerFileKinds.packages.contains(pathExtension)
+        case .documents: return ExplorerFileKinds.documents.contains(pathExtension)
         case .images: return ExplorerFileKinds.images.contains(pathExtension)
         case .videos: return ExplorerFileKinds.videos.contains(pathExtension)
         case .text: return ExplorerFileKinds.text.contains(pathExtension)
@@ -310,11 +332,23 @@ struct ExplorerGlobalFilesView: View {
     @Environment(\.dismiss) private var dismiss
     @Environment(\.nikaidoAccent) private var nikaidoAccent
 
-    @State private var filter: ExplorerGlobalFilter = .all
+    @State private var filter: ExplorerGlobalFilter
     @State private var search = ""
     @State private var previewTarget: ExplorerGlobalPreviewTarget?
     @State private var editorTarget: ExplorerEditorTarget?
     @State private var missingNotice: String?
+
+    init(
+        index: ExplorerGlobalIndex,
+        locations: [ExplorerStorageLocation],
+        initialFilter: ExplorerGlobalFilter = .all,
+        onReveal: @escaping (ExplorerGlobalFileResult) -> Void
+    ) {
+        _index = ObservedObject(wrappedValue: index)
+        self.locations = locations
+        self.onReveal = onReveal
+        _filter = State(initialValue: initialFilter)
+    }
 
     private var filtered: [ExplorerGlobalFileResult] {
         let query = search.trimmingCharacters(in: .whitespacesAndNewlines)
@@ -332,18 +366,35 @@ struct ExplorerGlobalFilesView: View {
     var body: some View {
         NavigationView {
             VStack(spacing: 0) {
-                Picker("Tipo", selection: $filter) {
-                    ForEach(ExplorerGlobalFilter.allCases) { option in
-                        Text(option.title).tag(option)
+                ScrollView(.horizontal, showsIndicators: false) {
+                    HStack(spacing: 8) {
+                        ForEach(ExplorerGlobalFilter.allCases) { option in
+                            Button {
+                                filter = option
+                            } label: {
+                                Text(option.title)
+                                    .font(.system(size: 15, weight: filter == option ? .bold : .semibold))
+                                    .foregroundStyle(filter == option ? Color.white : Color.primary)
+                                    .padding(.horizontal, 16)
+                                    .frame(height: 36)
+                                    .background(
+                                        Capsule().fill(
+                                            filter == option
+                                            ? nikaidoAccent
+                                            : Color.primary.opacity(0.10)
+                                        )
+                                    )
+                            }
+                            .buttonStyle(.plain)
+                        }
                     }
+                    .padding(.horizontal)
+                    .padding(.vertical, 8)
                 }
-                .pickerStyle(.segmented)
-                .padding(.horizontal)
-                .padding(.vertical, 8)
 
                 content
             }
-            .navigationTitle("Todos los archivos")
+            .navigationTitle(filter == .all ? "Todos los archivos" : filter.title)
             .navigationBarTitleDisplayMode(.inline)
             .searchable(text: $search, prompt: "Buscar por nombre")
             .toolbar {

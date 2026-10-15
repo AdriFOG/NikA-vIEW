@@ -42,8 +42,8 @@ enum ExplorerStorageSource: Sendable {
     var symbol: String {
         switch self {
         case .app: return "tray.full"
-        case .iCloud: return "icloud"
-        case .iPhone: return "iphone"
+        case .iCloud: return "icloud.fill"
+        case .iPhone: return "applelogo"
         case .provider: return "externaldrive"
         case .unknown: return "folder"
         }

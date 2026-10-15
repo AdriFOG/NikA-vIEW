@@ -75,6 +75,7 @@ struct PrivateVaultView: View {
     @State private var filePasswordError: String?
     @State private var isVerifyingFilePassword = false
     @State private var thumbnailsRevealed = false
+    @State private var postOfferAction: (() -> Void)?
 
     private var visibleChildren: [PrivateVaultEntry] {
         let children = vault.children(of: currentFolderID)
@@ -165,6 +166,7 @@ struct PrivateVaultView: View {
             pendingMethodPassword = nil
             showUnlockMethodChoice = false
             pendingProtectedAction = nil
+            postOfferAction = nil
             showFilePasswordPrompt = false
             filePasswordText = ""
             thumbnailsRevealed = false
@@ -207,7 +209,7 @@ struct PrivateVaultView: View {
                 choosePassword()
             }
         } message: {
-            Text("Puedes cambiarlo después desde el menú de la bóveda.")
+            Text("Con Face ID, Nikaido guarda tu contraseña cifrada y oculta en el Llavero de este iPhone, protegida por Face ID, y la usa por ti. Puedes cambiarlo desde el menú de la bóveda.")
         }
         .alert(
             "Nikaido Vault",
@@ -484,37 +486,70 @@ struct PrivateVaultView: View {
         }
     }
 
+    private func canOfferFaceID() -> Bool {
+        guard
+            unlockMethod != .faceID,
+            NikaidoUnlockPreference.biometricsAvailable
+        else {
+            return false
+        }
+
+        return !(unlockMethod == .password && NikaidoUnlockPreference.faceIDOfferDeclined)
+    }
+
     private func offerUnlockMethodIfNeeded(with typedPassword: String) {
-        guard unlockMethod == nil else { return }
+        guard unlockMethod != .faceID else { return }
 
         guard NikaidoUnlockPreference.biometricsAvailable else {
-            NikaidoUnlockPreference.method = .password
-            unlockMethod = .password
+            if unlockMethod == nil {
+                NikaidoUnlockPreference.method = .password
+                unlockMethod = .password
+            }
             return
         }
+
+        guard canOfferFaceID() else { return }
 
         pendingMethodPassword = typedPassword
         showUnlockMethodChoice = true
     }
 
+    private func finishOffer() {
+        let action = postOfferAction
+        postOfferAction = nil
+        action?()
+    }
+
     private func chooseFaceID() {
-        guard let typedPassword = pendingMethodPassword else { return }
+        guard let typedPassword = pendingMethodPassword else {
+            finishOffer()
+            return
+        }
+
         pendingMethodPassword = nil
 
-        Task {
-            let enabled = await NikaidoUnlockPreference.enableBiometric(
+        Task { @MainActor in
+            let result = await NikaidoUnlockPreference.enableBiometric(
                 password: typedPassword
             )
 
-            if enabled {
+            if case .enabled = result {
                 NikaidoUnlockPreference.method = .faceID
+                NikaidoUnlockPreference.faceIDOfferDeclined = false
                 unlockMethod = .faceID
                 biometricAutoAttempted = true
             } else {
                 NikaidoUnlockPreference.method = .password
                 unlockMethod = .password
-                methodNotice = "No se pudo activar Face ID. Seguirás usando tu contraseña."
+
+                if case .storeFailed = result {
+                    NikaidoUnlockPreference.faceIDOfferDeclined = true
+                }
+
+                methodNotice = result.message
             }
+
+            finishOffer()
         }
     }
 
@@ -522,7 +557,9 @@ struct PrivateVaultView: View {
         pendingMethodPassword = nil
         NikaidoUnlockPreference.disableBiometric()
         NikaidoUnlockPreference.method = .password
+        NikaidoUnlockPreference.faceIDOfferDeclined = true
         unlockMethod = .password
+        finishOffer()
     }
 
     private func attemptBiometricUnlock() {
@@ -547,7 +584,7 @@ struct PrivateVaultView: View {
             switch result {
             case .success(let storedPassword):
                 await vault.unlock(password: storedPassword)
-            case .cancelled:
+            case .cancelled, .fallback:
                 break
             case .invalidated:
                 NikaidoUnlockPreference.disableBiometric()
@@ -729,6 +766,7 @@ struct PrivateVaultView: View {
 
                     Button {
                         NikaidoUnlockPreference.disableBiometric()
+                        NikaidoUnlockPreference.faceIDOfferDeclined = false
                         unlockMethod = nil
                         methodNotice = "La próxima vez que desbloquees con tu contraseña te voy a preguntar otra vez: Face ID o contraseña."
                     } label: {
@@ -958,21 +996,54 @@ struct PrivateVaultView: View {
         }
 
         Task { @MainActor in
-            let result = await NikaidoFileAuth.authenticate(reason: reason)
+            // Sin Face ID guardado: se pide la contraseña de la bóveda.
+            guard unlockMethod == .faceID else {
+                promptForFilePassword(action, message: nil)
+                return
+            }
 
-            switch result {
-            case .success:
-                NikaidoFileAuth.markAuthenticated()
-                action()
+            // Con Face ID: Face ID libera la contraseña guardada en el
+            // Llavero y se comprueba contra la clave real de la bóveda.
+            let loaded = await NikaidoUnlockPreference.loadPassword(reason: reason)
+
+            switch loaded {
+            case .success(let storedPassword):
+                if await vault.verifyPassword(storedPassword) {
+                    NikaidoFileAuth.markAuthenticated()
+                    action()
+                } else {
+                    NikaidoUnlockPreference.disableBiometric()
+                    unlockMethod = nil
+                    promptForFilePassword(
+                        action,
+                        message: "La contraseña guardada para Face ID ya no coincide. Escríbela otra vez."
+                    )
+                }
             case .cancelled:
                 break
-            case .needsPassword:
-                pendingProtectedAction = action
-                filePasswordText = ""
-                filePasswordError = nil
-                showFilePasswordPrompt = true
+            case .fallback:
+                promptForFilePassword(action, message: nil)
+            case .invalidated:
+                NikaidoUnlockPreference.disableBiometric()
+                unlockMethod = nil
+                promptForFilePassword(
+                    action,
+                    message: "Face ID cambió o ya no está disponible. Escribe tu contraseña."
+                )
+            case .failed(let message):
+                promptForFilePassword(action, message: message)
             }
         }
+    }
+
+    private func promptForFilePassword(
+        _ action: @escaping () -> Void,
+        message: String?
+    ) {
+        pendingProtectedAction = action
+        filePasswordText = ""
+        filePasswordError = message
+        showFilePasswordPrompt = true
     }
 
     private func submitFilePassword() {
@@ -994,7 +1065,16 @@ struct PrivateVaultView: View {
 
                 let action = pendingProtectedAction
                 pendingProtectedAction = nil
-                action?()
+
+                if canOfferFaceID() {
+                    // Se ofrece guardar la contraseña para usar Face ID y,
+                    // al decidir, se abre el archivo.
+                    postOfferAction = action
+                    pendingMethodPassword = typed
+                    showUnlockMethodChoice = true
+                } else {
+                    action?()
+                }
             } else {
                 filePasswordError = "Contraseña incorrecta. Inténtalo de nuevo."
                 showFilePasswordPrompt = true
@@ -1525,6 +1605,7 @@ struct PrivateVaultMediaViewer: View {
     @State private var playback: PrivateVaultVideoPlayback?
     @State private var errorText: String?
     @State private var isPreparingVideo = false
+    @State private var viewerIsActive = true
 
     var body: some View {
         ZStack(alignment: .topTrailing) {
@@ -1571,6 +1652,7 @@ struct PrivateVaultMediaViewer: View {
             }
 
             Button {
+                viewerIsActive = false
                 vault.stopVideoPlayback(playback)
                 playback = nil
                 dismiss()
@@ -1583,6 +1665,10 @@ struct PrivateVaultMediaViewer: View {
             .padding()
         }
         .task(id: entry.id) {
+            viewerIsActive = true
+            vault.stopVideoPlayback(playback)
+            playback = nil
+
             do {
                 if entry.isImage {
                     let data = try await vault.decryptFileDataAsync(entry)
@@ -1603,6 +1689,15 @@ struct PrivateVaultMediaViewer: View {
                     let prepared = try await vault.makeVideoPlayback(
                         for: entry
                     )
+
+                    // Si el visor se cerró (o se cambió de video) mientras se
+                    // preparaba, no se reproduce: se libera de inmediato para
+                    // que ningún audio se quede sonando en segundo plano.
+                    guard viewerIsActive, !Task.isCancelled else {
+                        vault.stopVideoPlayback(prepared)
+                        return
+                    }
+
                     playback = prepared
                     prepared.play()
                     return
@@ -1616,11 +1711,13 @@ struct PrivateVaultMediaViewer: View {
         .onReceive(NotificationCenter.default.publisher(
             for: .nikaidoVaultDidLock
         )) { _ in
+            viewerIsActive = false
             vault.stopVideoPlayback(playback)
             playback = nil
             dismiss()
         }
         .onDisappear {
+            viewerIsActive = false
             vault.stopVideoPlayback(playback)
             playback = nil
         }

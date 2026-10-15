@@ -13,14 +13,53 @@ enum NikaidoUnlockMethod: String {
 enum NikaidoBiometricLoadResult {
     case success(String)
     case cancelled
+    case fallback
     case invalidated
     case failed(String)
+}
+
+enum NikaidoBiometricEnableResult {
+    case enabled
+    case unavailable
+    case cancelled
+    case storeFailed(OSStatus)
+
+    var message: String {
+        switch self {
+        case .enabled:
+            return ""
+        case .unavailable:
+            return "Face ID no está disponible para esta app. Revisa que Face ID esté activado en los Ajustes del iPhone y que la app tenga permiso. Seguirás usando tu contraseña."
+        case .cancelled:
+            return "Cancelaste Face ID. Seguirás usando tu contraseña."
+        case .storeFailed(let status):
+            let hint: String
+
+            if status == errSecMissingEntitlement {
+                hint = " El Llavero no está disponible para esta app en este entorno."
+            } else if status == errSecParam {
+                hint = " Confirma que el iPhone tenga un código de acceso activado."
+            } else {
+                hint = ""
+            }
+
+            return "iOS no permitió guardar la contraseña de forma segura (código \(status)).\(hint) Seguirás usando tu contraseña."
+        }
+    }
 }
 
 enum NikaidoUnlockPreference {
     private static let methodKey = "NikaidoVault.unlockMethod.v1"
     private static let service = "com.teamnikaido.solidsecviewer.vault-unlock"
     private static let account = "vault-password"
+    private static let declinedKey = "NikaidoVault.faceIDOfferDeclined.v1"
+
+    /// Si el usuario ya rechazó guardar la contraseña para Face ID, no se le
+    /// vuelve a insistir cada vez que escribe su contraseña.
+    static var faceIDOfferDeclined: Bool {
+        get { UserDefaults.standard.bool(forKey: declinedKey) }
+        set { UserDefaults.standard.set(newValue, forKey: declinedKey) }
+    }
 
     static var method: NikaidoUnlockMethod? {
         get {
@@ -46,26 +85,42 @@ enum NikaidoUnlockPreference {
         )
     }
 
-    /// Confirma Face ID una vez y guarda la contraseña en el Keychain,
-    /// protegida por biometría de este iPhone (no se sincroniza a iCloud).
-    static func enableBiometric(password: String) async -> Bool {
-        guard biometricsAvailable else { return false }
+    /// Confirma Face ID una vez y guarda la contraseña en el Keychain, cifrada
+    /// por iOS y protegida por la biometría de este iPhone (solo en este
+    /// dispositivo, no se sincroniza a iCloud). Nunca se guarda en texto plano
+    /// fuera del Keychain.
+    static func enableBiometric(password: String) async -> NikaidoBiometricEnableResult {
+        guard biometricsAvailable else { return .unavailable }
 
-        let confirmed: Bool = await withCheckedContinuation { continuation in
+        let confirmation: NikaidoBiometricEnableResult? = await withCheckedContinuation { continuation in
             let context = LAContext()
             context.evaluatePolicy(
                 .deviceOwnerAuthenticationWithBiometrics,
                 localizedReason: "Activar Face ID para Nikaido Vault"
-            ) { success, _ in
-                continuation.resume(returning: success)
+            ) { success, error in
+                if success {
+                    continuation.resume(returning: nil)
+                    return
+                }
+
+                let code = (error as? LAError)?.code
+
+                switch code {
+                case .userCancel, .systemCancel, .appCancel, .userFallback:
+                    continuation.resume(returning: .cancelled)
+                default:
+                    continuation.resume(returning: .unavailable)
+                }
             }
         }
 
-        guard confirmed else { return false }
+        if let confirmation { return confirmation }
 
-        return await Task.detached(priority: .userInitiated) {
+        let status = await Task.detached(priority: .userInitiated) {
             storePassword(password)
         }.value
+
+        return status == errSecSuccess ? .enabled : .storeFailed(status)
     }
 
     static func disableBiometric() {
@@ -73,12 +128,41 @@ enum NikaidoUnlockPreference {
         method = nil
     }
 
+    /// Pide Face ID y, solo si tiene éxito, lee la contraseña guardada en el
+    /// Keychain con ese mismo contexto ya autenticado (sin pedir otra vez).
     static func loadPassword(reason: String) async -> NikaidoBiometricLoadResult {
-        await withCheckedContinuation { continuation in
-            DispatchQueue.global(qos: .userInitiated).async {
-                let context = LAContext()
-                context.localizedReason = reason
+        let context = LAContext()
+        context.localizedFallbackTitle = "Usar contraseña"
 
+        let evaluation: NikaidoBiometricLoadResult? = await withCheckedContinuation { continuation in
+            context.evaluatePolicy(
+                .deviceOwnerAuthenticationWithBiometrics,
+                localizedReason: reason
+            ) { success, error in
+                if success {
+                    continuation.resume(returning: nil)
+                    return
+                }
+
+                let code = (error as? LAError)?.code
+
+                switch code {
+                case .userCancel, .systemCancel, .appCancel:
+                    continuation.resume(returning: .cancelled)
+                case .userFallback:
+                    continuation.resume(returning: .fallback)
+                default:
+                    continuation.resume(
+                        returning: .failed("Face ID no pudo verificarte. Usa tu contraseña.")
+                    )
+                }
+            }
+        }
+
+        if let evaluation { return evaluation }
+
+        return await withCheckedContinuation { continuation in
+            DispatchQueue.global(qos: .userInitiated).async {
                 let query: [String: Any] = [
                     kSecClass as String: kSecClassGenericPassword,
                     kSecAttrService as String: service,
@@ -102,7 +186,7 @@ enum NikaidoUnlockPreference {
                     } else {
                         continuation.resume(returning: .invalidated)
                     }
-                case errSecUserCanceled, errSecAuthFailed:
+                case errSecUserCanceled:
                     continuation.resume(returning: .cancelled)
                 case errSecItemNotFound:
                     continuation.resume(returning: .invalidated)
@@ -115,7 +199,7 @@ enum NikaidoUnlockPreference {
         }
     }
 
-    private static func storePassword(_ password: String) -> Bool {
+    private static func storePassword(_ password: String) -> OSStatus {
         deleteStoredPassword()
 
         var accessError: Unmanaged<CFError>?
@@ -125,7 +209,7 @@ enum NikaidoUnlockPreference {
             .biometryCurrentSet,
             &accessError
         ) else {
-            return false
+            return errSecParam
         }
 
         let query: [String: Any] = [
@@ -136,7 +220,7 @@ enum NikaidoUnlockPreference {
             kSecValueData as String: Data(password.utf8)
         ]
 
-        return SecItemAdd(query as CFDictionary, nil) == errSecSuccess
+        return SecItemAdd(query as CFDictionary, nil)
     }
 
     private static func deleteStoredPassword() {

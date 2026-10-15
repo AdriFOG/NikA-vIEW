@@ -13,6 +13,11 @@ store = (APP / "SecurityScopedFolderStore.swift").read_text(encoding="utf-8")
 models = (APP / "ExplorerModels.swift").read_text(encoding="utf-8")
 explorer = (APP / "ExplorerView.swift").read_text(encoding="utf-8")
 global_files = (APP / "ExplorerGlobalFiles.swift").read_text(encoding="utf-8")
+drag = (APP / "ExplorerDragMove.swift").read_text(encoding="utf-8")
+sec_viewer = (APP / "StoredSecCollectionViewer.swift").read_text(encoding="utf-8")
+sec_thumb = (APP / "VaultThumbnail.swift").read_text(encoding="utf-8")
+home = (APP / "HomeView.swift").read_text(encoding="utf-8")
+content_view = (APP / "ContentView.swift").read_text(encoding="utf-8")
 pbx = (ROOT / "SolidSecViewer.xcodeproj" / "project.pbxproj").read_text(encoding="utf-8")
 
 checks = {
@@ -31,6 +36,24 @@ checks = {
     "global files wired": "ExplorerGlobalFilesView" in explorer and "showGlobalFiles" in explorer,
     "global files registered": "ExplorerGlobalFiles.swift" in pbx and "NikaidoExtras.swift" in pbx,
     "vault is not indexed": "PrivateVault" not in global_files,
+    "custom drag handle": "struct ExplorerDragHandle" in drag and "LongPressGesture" in drag,
+    "drop onto folders": "case folder(ExplorerFileItem, pane: Int)" in drag and "moveItems(" in explorer,
+    "drop onto other pane": "case pane(Int)" in drag and "func performDrop" in explorer,
+    "no move into itself": "hasPrefix(itemPath" in explorer,
+    "drag files registered": "ExplorerDragMove.swift" in pbx,
+    "sec thumbnails fixed container": "Color.clear" in sec_thumb and "Color.clear" in sec_viewer,
+    "no video left playing (vault)": "viewerIsActive" in vault and "Un solo video a la vez" in session,
+    "no video left playing (.sec)": "viewerIsActive" in sec_viewer and "Un solo video a la vez" in sec_viewer,
+    "face id releases stored password": "kSecUseAuthenticationContext" in bio and "verifyPassword(storedPassword)" in vault,
+    "home shows added folders": "Carpetas añadidas" in explorer and "ExplorerExternalLocationRow" in drag,
+    "cloud and apple badges": "icloud.fill" in models and "applelogo" in models,
+    "drop onto added folders": "case location(ExplorerStorageLocation)" in drag and "destinationRoot:" in explorer,
+    "home screen": "struct HomeView" in home and "mode: AppMode = .home" in content_view,
+    "home tour + all folders": "struct HomeFolderTourView" in home and "struct HomeAllFoldersView" in home,
+    "home vault sparkles + logo hop": "HomeVaultSparkles" in home and "playLogoHop" in home,
+    "home categories filters": "case music" in global_files and "case packages" in global_files and "case documents" in global_files,
+    "home registered": "HomeView.swift" in pbx,
+    "face id store diagnostics": "NikaidoBiometricEnableResult" in bio and "storeFailed" in vault,
 }
 
 failed = [name for name, ok in checks.items() if not ok]
