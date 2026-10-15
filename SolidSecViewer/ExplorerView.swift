@@ -1150,13 +1150,13 @@ struct ExplorerView: View {
             externalLocations: locations.locations.filter { $0.kind == .authorized },
             onOpenLocation: { location in
                 activePane = index
-                pane(at: index).openLocation(location)
+                self.pane(at: index).openLocation(location)
             },
             onGoHome: {
                 activePane = index
 
                 if let local = locations.localLocation {
-                    pane(at: index).openLocation(local)
+                    self.pane(at: index).openLocation(local)
                 }
             }
         )
